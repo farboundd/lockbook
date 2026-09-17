@@ -665,6 +665,7 @@ impl LocalLb {
                                             &mut local_buffer.weak_images,
                                             &mut local_buffer.weak_path_pressures,
                                             &mut local_buffer.weak_viewport_settings,
+                                            &mut local_buffer.element_links,
                                             &base_buffer,
                                             &remote_buffer,
                                         );

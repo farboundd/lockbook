@@ -6,7 +6,7 @@ use egui::UiBuilder;
 use glam::DVec2;
 use indexmap::IndexMap;
 use lb_rs::Uuid;
-use lb_rs::model::svg::buffer::{Buffer, get_pen_colors};
+use lb_rs::model::svg::buffer::{Buffer, ElementLinks, get_pen_colors};
 use lb_rs::model::svg::element::{DynamicColor, Element, ManipulatorGroupId, Stroke, WeakImages};
 use resvg::usvg::Transform;
 
@@ -39,6 +39,8 @@ pub struct Selection {
     pub properties: Option<ElementEditableProperties>,
     selection_container: Option<egui::Rect>,
     selection_handles: Option<SelectionHandles>,
+    show_link_prompt: bool,
+    link_draft: String,
 }
 
 #[derive(Clone, Debug)]
@@ -812,6 +814,19 @@ impl Selection {
             .iter()
             .map(|el| (el.id, selection_ctx.buffer.elements.get(&el.id).unwrap().clone()))
             .collect();
+        let element_links = ElementLinks(
+            self.selected_elements
+                .iter()
+                .filter_map(|selected| {
+                    selection_ctx
+                        .buffer
+                        .element_links
+                        .0
+                        .get(&selected.id)
+                        .map(|url| (selected.id, url.clone()))
+                })
+                .collect(),
+        );
 
         let serialized_selection = serialize_inner(
             id_map,
@@ -819,6 +834,7 @@ impl Selection {
             &selection_ctx.buffer.weak_viewport_settings,
             &WeakImages::default(),
             &selection_ctx.buffer.weak_path_pressures,
+            &element_links,
         );
 
         ui.ctx().copy_text(serialized_selection);
@@ -891,6 +907,7 @@ impl Selection {
     fn clear_selection_els(&mut self) {
         self.selected_elements.clear();
         self.show_selection_popover = false;
+        self.show_link_prompt = false;
         self.properties = None;
     }
 
@@ -914,6 +931,8 @@ impl Selection {
         );
 
         buffer_changed |= self.show_common_properties(ui, selection_ctx, &mut properties.common);
+
+        buffer_changed |= self.show_link_controls(ui, selection_ctx);
 
         match &mut properties.specific {
             ElementSpecificEditableProperties::Stroke(stroke_properties) => {
@@ -941,6 +960,57 @@ impl Selection {
         self.properties = Some(properties);
 
         buffer_changed
+    }
+
+    fn show_link_controls(&mut self, ui: &mut egui::Ui, selection_ctx: &mut ToolContext) -> bool {
+        let selected_link = self
+            .selected_elements
+            .first()
+            .and_then(|selected| selection_ctx.buffer.element_links.0.get(&selected.id))
+            .cloned();
+
+        ui.add_space(12.0);
+        show_section_header(ui, "link");
+        ui.add_space(5.0);
+
+        if let Some(url) = selected_link.clone() {
+            if Button::default().text("Visit this site").show(ui).clicked() {
+                ui.ctx().open_url(egui::OpenUrl { url, new_tab: true });
+            }
+        }
+
+        if Button::default().text("Attach link").show(ui).clicked() {
+            self.link_draft = selected_link.unwrap_or_default();
+            self.show_link_prompt = true;
+        }
+
+        if !self.show_link_prompt {
+            return false;
+        }
+
+        ui.add_space(5.0);
+        ui.label("URL");
+        ui.text_edit_singleline(&mut self.link_draft);
+        let mut changed = false;
+        ui.horizontal(|ui| {
+            if ui.button("Cancel").clicked() {
+                self.show_link_prompt = false;
+            }
+            if ui.button("Save link").clicked() {
+                let link = self.link_draft.trim().to_owned();
+                for selected in &self.selected_elements {
+                    if link.is_empty() {
+                        selection_ctx.buffer.element_links.0.remove(&selected.id);
+                    } else {
+                        selection_ctx.buffer.element_links.0.insert(selected.id, link.clone());
+                    }
+                }
+                selection_ctx.buffer.links_changed = true;
+                self.show_link_prompt = false;
+                changed = true;
+            }
+        });
+        changed
     }
 
     fn show_common_properties(

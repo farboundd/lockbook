@@ -21,6 +21,12 @@ const ZOOM_G_ID: &str = "lb_master_transform";
 const WEAK_IMAGE_G_ID: &str = "lb_images";
 const WEAK_PATH_PRESSURES_G_ID: &str = "lb_path_pressures";
 const WEAK_VIEWPORT_SETTINGS_G_ID: &str = "lb_viewport_settings";
+const ELEMENT_LINKS_G_ID: &str = "lb_element_links";
+
+/// URLs attached to individual canvas elements. Kept separately from the SVG
+/// primitives so an exported document remains valid SVG.
+#[derive(Default, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ElementLinks(pub HashMap<Uuid, String>);
 
 #[derive(Default, Clone)]
 pub struct Buffer {
@@ -28,6 +34,8 @@ pub struct Buffer {
     pub weak_images: WeakImages,
     pub weak_path_pressures: WeakPathPressures,
     pub weak_viewport_settings: WeakViewportSettings,
+    pub element_links: ElementLinks,
+    pub links_changed: bool,
     pub master_transform_changed: bool,
     pub id_map: HashMap<Uuid, String>,
 }
@@ -57,6 +65,7 @@ impl Buffer {
         let mut weak_images = WeakImages::default();
         let mut weak_path_pressures = WeakPathPressures::default();
         let mut weak_viewport_settings = WeakViewportSettings::default();
+        let mut element_links = ElementLinks::default();
 
         let maybe_tree = usvg::Tree::from_str(content, &Options::default(), &Database::default());
 
@@ -73,6 +82,7 @@ impl Buffer {
                     &mut id_map,
                     &mut weak_images,
                     &mut weak_path_pressures,
+                    &mut element_links,
                 )
             });
         }
@@ -82,6 +92,8 @@ impl Buffer {
             id_map,
             weak_images,
             weak_viewport_settings,
+            element_links,
+            links_changed: false,
             weak_path_pressures,
             master_transform_changed: false,
         }
@@ -90,9 +102,13 @@ impl Buffer {
     pub fn reload(
         local_elements: &mut IndexMap<Uuid, Element>, local_weak_images: &mut WeakImages,
         local_weak_pressures: &mut WeakPathPressures,
-        local_viewport_settings: &mut WeakViewportSettings, base_buffer: &Self,
+        local_viewport_settings: &mut WeakViewportSettings, local_element_links: &mut ElementLinks,
+        base_buffer: &Self,
         remote_buffer: &Self,
     ) {
+        if base_buffer.element_links.0 != remote_buffer.element_links.0 {
+            *local_element_links = remote_buffer.element_links.clone();
+        }
         // todo: convert weak images
         for (id, base_img) in base_buffer.weak_images.iter() {
             if let Some(remote_img) = remote_buffer.weak_images.get(id) {
@@ -209,6 +225,7 @@ impl Buffer {
             &self.weak_viewport_settings,
             &self.weak_images,
             &self.weak_path_pressures,
+            &self.element_links,
         )
     }
 }
@@ -217,6 +234,7 @@ pub fn serialize_inner(
     id_map: &HashMap<Uuid, String>, elements: &IndexMap<Uuid, Element>,
     weak_viewport_settings: &WeakViewportSettings, buffer_weak_images: &WeakImages,
     weak_pressures: &WeakPathPressures,
+    element_links: &ElementLinks,
 ) -> String {
     let mut root = r#"<svg xmlns="http://www.w3.org/2000/svg">"#.into();
     let mut weak_images = WeakImages::default();
@@ -297,6 +315,12 @@ pub fn serialize_inner(
         );
     }
 
+    if !element_links.0.is_empty() {
+        let binary_data = bincode::serialize(element_links).expect("Failed to serialize");
+        let base64_data = base64::encode(&binary_data);
+        let _ = write!(&mut root, "<g id=\"{ELEMENT_LINKS_G_ID}\"> <g id=\"{base64_data}\"></g></g>");
+    }
+
     let binary_data = bincode::serialize(&weak_viewport_settings).expect("Failed to serialize");
     let base64_data = base64::encode(&binary_data);
 
@@ -313,6 +337,7 @@ pub fn parse_child(
     u_el: &usvg::Node, elements: &mut IndexMap<Uuid, Element>,
     weak_viewport_settings: &mut WeakViewportSettings, id_map: &mut HashMap<Uuid, String>,
     weak_images: &mut WeakImages, weak_path_pressures: &mut WeakPathPressures,
+    element_links: &mut ElementLinks,
 ) {
     match &u_el {
         usvg::Node::Group(group) => {
@@ -343,6 +368,12 @@ pub fn parse_child(
                         bincode::deserialize(&base64).unwrap_or_default();
                     *weak_viewport_settings = decoded;
                 }
+            } else if group.id().eq(ELEMENT_LINKS_G_ID) {
+                if let Some(usvg::Node::Group(element_links_g)) = group.children().first() {
+                    let base64 = base64::decode(element_links_g.id().as_bytes())
+                        .expect("Failed to decode base64");
+                    *element_links = bincode::deserialize(&base64).unwrap_or_default();
+                }
             } else {
                 group.children().iter().for_each(|u_el| {
                     parse_child(
@@ -352,6 +383,7 @@ pub fn parse_child(
                         id_map,
                         weak_images,
                         weak_path_pressures,
+                        element_links,
                     )
                 });
             }
@@ -556,4 +588,27 @@ fn to_svg_transform(transform: Transform) -> String {
         "matrix({} {} {} {} {} {})",
         transform.sx, transform.ky, transform.kx, transform.sy, transform.tx, transform.ty
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Buffer;
+    use uuid::Uuid;
+
+    #[test]
+    fn element_links_survive_svg_round_trip() {
+        let id = Uuid::from_u128(0x11111111111111111111111111111111);
+        let svg = format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><path id=\"{id}\" d=\"M 0 0 L 10 10\" stroke=\"black\"/></svg>"
+        );
+        let mut buffer = Buffer::new(&svg);
+        buffer.element_links.0.insert(id, "https://example.com/about".into());
+
+        let reloaded = Buffer::new(&buffer.serialize());
+
+        assert_eq!(
+            reloaded.element_links.0.get(&id).map(String::as_str),
+            Some("https://example.com/about")
+        );
+    }
 }

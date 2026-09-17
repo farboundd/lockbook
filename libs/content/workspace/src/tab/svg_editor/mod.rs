@@ -19,6 +19,7 @@ use crate::tab::input_controller::{
 };
 use crate::tab::svg_editor::toolbar::Toolbar;
 use crate::tab::svg_editor::viewport::transform_canvas;
+use crate::tab::svg_editor::util::pointer_intersects_element;
 use crate::theme::palette::ThemePalette;
 use crate::workspace::WsPersistentStore;
 
@@ -244,6 +245,11 @@ impl SVGEditor {
         self.show_background_overlay();
         let global_diff = self.show_canvas(ui);
 
+        if self.buffer.links_changed {
+            self.buffer.links_changed = false;
+            self.has_queued_save_request = true;
+        }
+
         if cfg!(debug_assertions) {
             self.show_debug_info(ui);
         }
@@ -307,6 +313,28 @@ impl SVGEditor {
     fn process_events(&mut self, ui: &mut egui::Ui) {
         if !ui.is_enabled() {
             return;
+        }
+
+        // A read-only canvas is its presentation/view mode. Links are only
+        // followed here so editing never turns a selection click into navigation.
+        if self.read_only {
+            let released_at = ui.input(|input| {
+                input.events.iter().find_map(|event| match event {
+                    egui::Event::PointerButton { pos, pressed: false, .. } => Some(*pos),
+                    _ => None,
+                })
+            });
+            if let Some(pos) = released_at {
+                if let Some(url) = self.buffer.elements.iter().rev().find_map(|(id, element)| {
+                    self.buffer.element_links.0.get(id).filter(|_| {
+                        !element.deleted()
+                            && pointer_intersects_element(element, pos, None, 10.0)
+                    })
+                }) {
+                    ui.ctx().open_url(egui::OpenUrl { url: url.clone(), new_tab: true });
+                    return;
+                }
+            }
         }
 
         if !self.read_only {
