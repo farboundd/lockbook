@@ -348,6 +348,52 @@ class MainScreenActivity : AppCompatActivity() {
             mainScreenModel.navigate(MainNavigationAction.SelectSidebar(destination))
             true
         }
+
+        consumePendingOpenLink()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        consumePendingOpenLink()
+    }
+
+    private fun consumePendingOpenLink() {
+        val request = PendingOpenLinkStore.take(this) ?: return
+        val accountApiUrl = Lb.getAccount().apiUrl
+        val accountOrigin = OpenLinkParser.canonicalOrigin(accountApiUrl)
+        if (accountOrigin == null || !OpenLinkParser.originsMatch(request.serverOrigin, accountOrigin)) {
+            MaterialAlertDialogBuilder(this)
+                .setTitle(R.string.open_link_wrong_server_title)
+                .setMessage(getString(R.string.open_link_wrong_server, request.serverOrigin, accountOrigin ?: accountApiUrl))
+                .setNegativeButton(android.R.string.cancel, null)
+                .show()
+            return
+        }
+
+        mainScreenModel.showProgressOverlay(true)
+        lifecycleScope.launch(Dispatchers.IO) {
+            val syncError = runCatching { Lb.sync() }.exceptionOrNull()
+            val file = runCatching { Lb.getFileById(request.fileId) }.getOrNull()
+            withContext(Dispatchers.Main) {
+                mainScreenModel.showProgressOverlay(false)
+                fileTreeViewModel.reloadFiles()
+                if (file != null) {
+                    workspaceModel.openFile(
+                        OpenFileRequest(
+                            id = file.id,
+                            newFile = false,
+                            presentation = OpenFilePresentation.ShowDetail,
+                        ),
+                    )
+                    mainScreenModel.navigate(MainNavigationAction.FocusDetail)
+                } else if (syncError is net.lockbook.LbError) {
+                    alertModel.notifyError(syncError)
+                } else {
+                    alertModel.notify(getString(R.string.open_link_not_found))
+                }
+            }
+        }
     }
 
     internal fun setFileSelectionActive(isActive: Boolean) {

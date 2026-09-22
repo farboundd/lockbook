@@ -4536,6 +4536,7 @@ dependencies = [
  "tracing-appender",
  "tracing-gcp",
  "tracing-subscriber",
+ "urlencoding",
  "uuid 1.24.0",
  "warp",
  "x509-parser",

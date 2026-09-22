@@ -291,6 +291,13 @@
     <string name="pending_shares_empty_message">When others share files with you, they\'ll appear here.</string>
 
     <string name="export">Export</string>
+    <string name="copy_lockbook_link">Copy Lockbook link</string>
+    <string name="share_lockbook_link">Share Lockbook link</string>
+    <string name="lockbook_link_copied">Lockbook link copied</string>
+    <string name="invalid_lockbook_link">This Lockbook link is invalid.</string>
+    <string name="open_link_wrong_server_title">Different Lockbook server</string>
+    <string name="open_link_wrong_server">This link belongs to %1$s, but this account uses %2$s. Switch accounts before opening it.</string>
+    <string name="open_link_not_found">The linked file could not be found.</string>
     <string name="write_access">Write access</string>
     <string name="read_access">Read access</string>
     <string name="username">Username</string>
