@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import net.lockbook.Lb
 import net.lockbook.LbError
 import java.io.File
@@ -52,6 +53,11 @@ class MainScreenViewModel(
     val navigationEffects = _navigationEffects.receiveAsFlow()
 
     val exportImportModel = ExportImportModel(_mainUiEffect)
+    var pendingExportFiles: List<File>
+        get() = savedStateHandle.get<ArrayList<String>>(PENDING_EXPORT_FILES_KEY)?.map(::File).orEmpty()
+        set(files) {
+            savedStateHandle[PENDING_EXPORT_FILES_KEY] = ArrayList(files.map { it.absolutePath })
+        }
 
     fun launchActivityScreen(screen: ActivityScreen) {
         activityScreen = screen
@@ -75,11 +81,14 @@ class MainScreenViewModel(
         return transition.handled
     }
 
-    fun showProgressOverlay(show: Boolean) {
-        _mainUiEffect.value = MainUiEffect.ShowHideProgressOverlay(show)
+    fun showProgressOverlay(
+        show: Boolean,
+        messageRes: Int? = null,
+    ) {
+        _mainUiEffect.value = MainUiEffect.ShowHideProgressOverlay(show, messageRes)
     }
 
-    fun shareSelectedFiles(
+    fun exportSelectedFiles(
         selectedFiles: List<net.lockbook.File>,
         appDataDir: File,
     ) {
@@ -87,7 +96,11 @@ class MainScreenViewModel(
             try {
                 exportImportModel.exportDocuments(selectedFiles, appDataDir)
             } catch (err: LbError) {
-                _mainUiEffect.postValue(MainUiEffect.NotifyError(err))
+                withContext(Dispatchers.Main) {
+                    exportImportModel.isLoadingOverlayVisible = false
+                    _mainUiEffect.value = MainUiEffect.ShowHideProgressOverlay(false)
+                    _mainUiEffect.value = MainUiEffect.NotifyError(err)
+                }
             }
         }
     }
@@ -112,6 +125,7 @@ class MainScreenViewModel(
         private const val MAIN_NAVIGATION_PREFERENCES = "main_navigation_preferences"
         private const val LAST_SIDEBAR_DESTINATION_KEY = "last_sidebar_destination"
         private const val DURABLE_SIDEBAR_DESTINATION_KEY = "main_navigation_sidebar"
+        private const val PENDING_EXPORT_FILES_KEY = "pending_export_files"
 
         private const val FILES_DESTINATION = "files"
         private const val RECENTS_DESTINATION = "recents"
@@ -184,10 +198,10 @@ sealed class TransientScreen {
     ) : TransientScreen()
 
     data class Share(
-        val file: net.lockbook.File,
+        val files: List<net.lockbook.File>,
     ) : TransientScreen()
 
-    data class ShareExport(
+    data class Export(
         val files: List<File>,
     ) : TransientScreen()
 
@@ -199,9 +213,10 @@ sealed class TransientScreen {
 sealed class MainUiEffect {
     data class ShowHideProgressOverlay(
         val show: Boolean,
+        val messageRes: Int? = null,
     ) : MainUiEffect()
 
-    data class ShareDocuments(
+    data class ExportDocuments(
         val files: ArrayList<File>,
     ) : MainUiEffect()
 

@@ -3,6 +3,7 @@
 package app.lockbook.model
 
 import android.text.format.DateUtils
+import app.lockbook.R
 import app.lockbook.util.*
 import net.lockbook.File.FileType
 import net.lockbook.Lb
@@ -44,14 +45,14 @@ class ExportImportModel(
         val cacheDir = getMainShareFolder(appDataDir)
 
         isLoadingOverlayVisible = true
-        _mainUiEffect.postValue(MainUiEffect.ShowHideProgressOverlay(isLoadingOverlayVisible))
+        _mainUiEffect.postValue(MainUiEffect.ShowHideProgressOverlay(isLoadingOverlayVisible, R.string.exporting))
 
         clearShareStorage(cacheDir)
 
         val documents = mutableListOf<net.lockbook.File>()
         retrieveSelectedDocuments(selectedFiles, documents)
 
-        val filesToShare = ArrayList<File>()
+        val exportedFiles = ArrayList<File>()
         val shareFolder = createRandomShareFolderInstance(cacheDir)
         shareFolder.mkdirs()
 
@@ -67,7 +68,7 @@ class ExportImportModel(
             try {
                 Lb.exportFile(file.id, shareItemFolder.absolutePath, false)
 
-                filesToShare.add(
+                exportedFiles.add(
                     File(
                         shareItemFolder,
                         file.name,
@@ -84,7 +85,7 @@ class ExportImportModel(
             }
         }
 
-        _mainUiEffect.postValue(MainUiEffect.ShareDocuments(filesToShare))
+        _mainUiEffect.postValue(MainUiEffect.ExportDocuments(exportedFiles))
     }
 
     private fun retrieveSelectedDocuments(

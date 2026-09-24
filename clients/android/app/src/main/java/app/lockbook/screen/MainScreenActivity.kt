@@ -2,13 +2,14 @@
 
 package app.lockbook.screen
 
-import android.content.ClipData
 import android.content.Intent
 import android.graphics.Color
 import android.net.Uri
 import android.os.Bundle
+import android.provider.DocumentsContract
 import android.view.View
 import android.view.WindowManager
+import android.webkit.MimeTypeMap
 import androidx.activity.BackEventCompat
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.SystemBarStyle
@@ -16,7 +17,6 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.content.FileProvider
 import androidx.core.view.GravityCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
@@ -43,7 +43,9 @@ import kotlinx.coroutines.withContext
 import net.lockbook.Lb
 import net.lockbook.LbStatus
 import java.io.File
+import java.io.IOException
 import java.lang.ref.WeakReference
+import java.util.Locale
 
 class MainScreenActivity : AppCompatActivity() {
     private var _binding: ActivityMainScreenBinding? = null
@@ -108,11 +110,59 @@ class MainScreenActivity : AppCompatActivity() {
         }
 
     private val onExport =
-        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
-            mainScreenModel.showProgressOverlay(false)
-            mainScreenModel.exportImportModel.isLoadingOverlayVisible = false
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            val exportedFiles = mainScreenModel.pendingExportFiles
+            val destination = result.data?.data
+            if (result.resultCode != RESULT_OK || destination == null || exportedFiles.isEmpty()) {
+                finishExport()
+                return@registerForActivityResult
+            }
 
-            currentFilesFragment()?.unselectFiles()
+            mainScreenModel.showProgressOverlay(true, R.string.exporting)
+            lifecycleScope.launch(Dispatchers.IO) {
+                var savedCount = 0
+                val outcome =
+                    runCatching {
+                        if (exportedFiles.size == 1) {
+                            writeExportFile(exportedFiles.single(), destination)
+                            savedCount = 1
+                        } else {
+                            val parent =
+                                DocumentsContract.buildDocumentUriUsingTree(
+                                    destination,
+                                    DocumentsContract.getTreeDocumentId(destination),
+                                )
+                            exportedFiles.forEach { source ->
+                                val created =
+                                    DocumentsContract.createDocument(
+                                        contentResolver,
+                                        parent,
+                                        exportMimeType(source),
+                                        source.name,
+                                    ) ?: throw IOException("Could not create " + source.name)
+                                try {
+                                    writeExportFile(source, created)
+                                } catch (error: Exception) {
+                                    runCatching { DocumentsContract.deleteDocument(contentResolver, created) }
+                                    throw error
+                                }
+                                savedCount++
+                            }
+                        }
+                    }
+
+                withContext(Dispatchers.Main) {
+                    finishExport()
+                    val message =
+                        when {
+                            outcome.isSuccess ->
+                                resources.getQuantityString(R.plurals.exported_files, savedCount, savedCount)
+                            savedCount > 0 -> getString(R.string.export_partially_failed, savedCount, exportedFiles.size)
+                            else -> getString(R.string.export_failed)
+                        }
+                    alertModel.notify(message)
+                }
+            }
         }
 
     val mainScreenModel: MainScreenViewModel by viewModels()
@@ -209,7 +259,7 @@ class MainScreenActivity : AppCompatActivity() {
         }
 
         if (mainScreenModel.exportImportModel.isLoadingOverlayVisible) {
-            handleMainUiEffect(MainUiEffect.ShowHideProgressOverlay(mainScreenModel.exportImportModel.isLoadingOverlayVisible))
+            handleMainUiEffect(MainUiEffect.ShowHideProgressOverlay(true, R.string.exporting))
         }
 
         mainScreenModel.launchActivityScreen.observe(
@@ -253,7 +303,7 @@ class MainScreenActivity : AppCompatActivity() {
                 }
 
                 is TransientScreen.Share -> {
-                    ShareFileBottomSheetFragment.newInstance(screen.file.id).show(
+                    ShareFileBottomSheetFragment.newInstance(screen.files.map { it.id }).show(
                         supportFragmentManager,
                         ShareFileBottomSheetFragment.TAG,
                     )
@@ -273,8 +323,8 @@ class MainScreenActivity : AppCompatActivity() {
                     )
                 }
 
-                is TransientScreen.ShareExport -> {
-                    finalizeShare(screen.files)
+                is TransientScreen.Export -> {
+                    launchExportChooser(screen.files)
                 }
 
                 is TransientScreen.Delete -> {
@@ -522,11 +572,13 @@ class MainScreenActivity : AppCompatActivity() {
                 alertModel.notifyError(effect.error)
             }
 
-            is MainUiEffect.ShareDocuments -> {
-                finalizeShare(effect.files)
+            is MainUiEffect.ExportDocuments -> {
+                launchExportChooser(effect.files)
             }
 
             is MainUiEffect.ShowHideProgressOverlay -> {
+                binding.progressOverlayMessage.isVisible = effect.show && effect.messageRes != null
+                effect.messageRes?.let(binding.progressOverlayMessage::setText)
                 if (effect.show) {
                     Animate.animateVisibility(binding.progressOverlay, View.VISIBLE, 100, 500)
                 } else {
@@ -760,33 +812,47 @@ class MainScreenActivity : AppCompatActivity() {
         }
     }
 
-    private fun finalizeShare(files: List<File>) {
-        val uris = ArrayList<Uri>()
-
-        for (file in files) {
-            uris.add(
-                FileProvider.getUriForFile(
-                    this,
-                    "$packageName.fileprovider",
-                    file,
-                ),
-            )
+    private fun launchExportChooser(files: List<File>) {
+        if (files.isEmpty()) {
+            finishExport()
+            alertModel.notify(getString(R.string.export_no_documents))
+            return
         }
 
-        val intent = Intent(Intent.ACTION_SEND_MULTIPLE)
-        intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+        mainScreenModel.pendingExportFiles = files
+        val intent =
+            if (files.size == 1) {
+                Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+                    addCategory(Intent.CATEGORY_OPENABLE)
+                    type = exportMimeType(files.single())
+                    putExtra(Intent.EXTRA_TITLE, files.single().name)
+                }
+            } else {
+                Intent(Intent.ACTION_OPEN_DOCUMENT_TREE)
+            }
+        onExport.launch(intent)
+    }
 
-        val clipData = ClipData.newRawUri(null, Uri.EMPTY)
-        uris.forEach { uri ->
-            clipData.addItem(ClipData.Item(uri))
+    private fun writeExportFile(
+        source: File,
+        destination: Uri,
+    ) {
+        source.inputStream().use { input ->
+            val output = contentResolver.openOutputStream(destination, "w")
+                ?: throw IOException("Could not open export destination")
+            output.use(input::copyTo)
         }
+    }
 
-        intent.clipData = clipData
-        intent.type = "*/*"
-        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        intent.putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
+    private fun exportMimeType(file: File): String =
+        MimeTypeMap.getSingleton().getMimeTypeFromExtension(file.extension.lowercase(Locale.ROOT))
+            ?: "application/octet-stream"
 
-        onExport.launch(Intent.createChooser(intent, "Send multiple files."))
+    private fun finishExport() {
+        mainScreenModel.pendingExportFiles = emptyList()
+        mainScreenModel.showProgressOverlay(false)
+        mainScreenModel.exportImportModel.isLoadingOverlayVisible = false
+        currentFilesFragment()?.unselectFiles()
     }
 
     override fun onDestroy() {

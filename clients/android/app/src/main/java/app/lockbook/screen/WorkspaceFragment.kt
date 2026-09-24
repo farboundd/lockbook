@@ -326,13 +326,13 @@ class WorkspaceFragment : Fragment() {
                         .hideSoftInputFromWindow(workspaceWrapper.windowToken, 0)
 
                     getCurrentFile()?.let {
-                        mainScreenModel.launchTransientScreen(TransientScreen.Share(it))
+                        mainScreenModel.launchTransientScreen(TransientScreen.Share(listOf(it)))
                     }
                 }
 
-                R.id.menu_text_editor_share_externally -> {
+                R.id.menu_text_editor_export -> {
                     getCurrentFile()?.let {
-                        mainScreenModel.shareSelectedFiles(listOf(it), requireContext().cacheDir)
+                        mainScreenModel.exportSelectedFiles(listOf(it), requireContext().cacheDir)
                     }
                 }
             }
@@ -599,9 +599,8 @@ class WorkspaceFragment : Fragment() {
                     .isVisible =
                     false
                 binding.workspaceToolbar.menu
-                    .findItem(R.id.menu_text_editor_share_externally)
-                    .isVisible =
-                    false
+                    .findItem(R.id.menu_text_editor_export)
+                    .isVisible = false
                 binding.workspaceToolbar.setTitle("")
             }
 
@@ -616,9 +615,8 @@ class WorkspaceFragment : Fragment() {
                     .findItem(R.id.menu_text_editor_share)
                     .isVisible = true
                 binding.workspaceToolbar.menu
-                    .findItem(R.id.menu_text_editor_share_externally)
-                    .isVisible =
-                    true
+                    .findItem(R.id.menu_text_editor_export)
+                    .isVisible = true
                 binding.workspaceToolbar.setTitle(tabTitle)
             }
         }

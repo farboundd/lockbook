@@ -1,9 +1,5 @@
 package app.lockbook.screen
 
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Context
-import android.content.Intent
 import android.content.res.ColorStateList
 import android.view.LayoutInflater
 import android.view.View
@@ -22,7 +18,6 @@ import app.lockbook.model.FileTreeViewModel
 import app.lockbook.model.MainNavigationAction
 import app.lockbook.model.MainScreenViewModel
 import app.lockbook.model.TransientScreen
-import app.lockbook.util.OpenLinkBuilder
 import com.google.android.material.color.MaterialColors
 import com.google.android.material.snackbar.Snackbar
 import kotlinx.coroutines.Dispatchers
@@ -54,9 +49,7 @@ internal enum class FileSelectionAction(
     ),
     Move(R.string.menu_list_files_move, R.drawable.ic_baseline_content_cut_24),
     Pin(R.string.pin, R.drawable.ic_outline_push_pin_24),
-    Share(R.string.menu_list_files_share, R.drawable.ic_outline_folder_shared_24, singleSelectionOnly = true),
-    CopyLockbookLink(R.string.copy_lockbook_link, R.drawable.baseline_content_copy_24, singleSelectionOnly = true),
-    ShareLockbookLink(R.string.share_lockbook_link, R.drawable.ic_baseline_share_24, singleSelectionOnly = true),
+    Share(R.string.menu_list_files_share, R.drawable.ic_baseline_group_24, singleSelectionOnly = true),
     Export(R.string.export, R.drawable.ic_baseline_share_24),
     Info(R.string.menu_list_files_info, R.drawable.ic_baseline_info_24, singleSelectionOnly = true),
     Delete(R.string.menu_list_files_delete, R.drawable.ic_outline_delete_24, destructive = true),
@@ -206,49 +199,16 @@ internal class FileSelectionActionDispatcher(
                 mainScreenModel.launchTransientScreen(TransientScreen.Delete(files))
             }
 
-            FileSelectionAction.Export -> {
-                mainScreenModel.shareSelectedFiles(files, fragment.requireContext().cacheDir)
-                onClearSelection()
-            }
-
             FileSelectionAction.Share -> {
-                files.singleOrNull()?.let { mainScreenModel.launchTransientScreen(TransientScreen.Share(it)) }
+                files.singleOrNull()?.let { mainScreenModel.launchTransientScreen(TransientScreen.Share(listOf(it))) }
                 onClearSelection()
             }
 
-            FileSelectionAction.CopyLockbookLink -> {
-                files.singleOrNull()?.let(::copyLockbookLink)
-            }
-
-            FileSelectionAction.ShareLockbookLink -> {
-                files.singleOrNull()?.let(::shareLockbookLink)
+            FileSelectionAction.Export -> {
+                mainScreenModel.exportSelectedFiles(files, fragment.requireContext().cacheDir)
+                onClearSelection()
             }
         }
-    }
-
-    private fun lockbookLink(file: File): String = OpenLinkBuilder.build(Lb.getAccount().apiUrl, file.id)
-
-    private fun copyLockbookLink(file: File) {
-        runCatching {
-            val context = fragment.requireContext()
-            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-            clipboard.setPrimaryClip(ClipData.newPlainText(context.getString(R.string.copy_lockbook_link), lockbookLink(file)))
-            makeSnackbar(R.string.lockbook_link_copied).show()
-            onClearSelection()
-        }.onFailure { alertModel.notify(it.message ?: fragment.getString(R.string.unexpected_error)) }
-    }
-
-    private fun shareLockbookLink(file: File) {
-        runCatching {
-            val context = fragment.requireContext()
-            val send =
-                Intent(Intent.ACTION_SEND).apply {
-                    type = "text/plain"
-                    putExtra(Intent.EXTRA_TEXT, lockbookLink(file))
-                }
-            context.startActivity(Intent.createChooser(send, context.getString(R.string.share_lockbook_link)))
-            onClearSelection()
-        }.onFailure { alertModel.notify(it.message ?: fragment.getString(R.string.unexpected_error)) }
     }
 
     private fun pin(files: List<File>) {
