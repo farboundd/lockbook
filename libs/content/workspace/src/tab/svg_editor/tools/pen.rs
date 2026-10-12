@@ -192,17 +192,18 @@ impl Pen {
         };
 
         self.update_long_press(payload);
+        let document_pos = pen_ctx.viewport_settings.screen_to_document(payload.pos);
+        self.path_builder.tolerance = 0.5 / pen_ctx.viewport_settings.master_transform.sx as f64;
 
         if let Some(Element::Path(p)) = pen_ctx.buffer.elements.get_mut(&self.current_id) {
             p.diff_state.data_changed = true;
             p.stroke = Some(path_stroke);
 
             if self.is_long_press(payload) {
-                self.path_builder
-                    .snap(pen_ctx.viewport_settings.master_transform, &mut p.data);
+                self.path_builder.snap(&mut p.data);
             }
 
-            let new_seg_i = self.path_builder.line_to(payload.pos, &mut p.data);
+            let new_seg_i = self.path_builder.line_to(document_pos, &mut p.data);
 
             if new_seg_i.is_some() {
                 self.insert_force(pen_ctx, payload.force);
@@ -222,13 +223,10 @@ impl Pen {
                 deleted: false,
             });
 
-            pen_ctx
-                .buffer
-                .elements
-                .insert_before(0, self.current_id, el);
+            pen_ctx.buffer.insert(self.current_id, el);
 
             if let Some(Element::Path(p)) = pen_ctx.buffer.elements.get_mut(&self.current_id) {
-                self.path_builder.line_to(payload.pos, &mut p.data);
+                self.path_builder.line_to(document_pos, &mut p.data);
             }
         }
     }
@@ -295,8 +293,10 @@ impl Pen {
     }
 
     fn predict_draw(&mut self, pen_ctx: &mut ToolContext<'_>, payload: ToolPayload) {
+        let document_pos = pen_ctx.viewport_settings.screen_to_document(payload.pos);
         if let Some(Element::Path(p)) = pen_ctx.buffer.elements.get_mut(&self.current_id) {
-            let maybe_new_mg = self.path_builder.line_to(payload.pos, &mut p.data);
+            p.diff_state.data_changed = true;
+            let maybe_new_mg = self.path_builder.line_to(document_pos, &mut p.data);
             trace!(maybe_new_mg, "adding predicted touch to the path at");
 
             // let's repeat the last known force for predicted touches
@@ -319,6 +319,7 @@ impl Pen {
     fn clear_predicted_points(&mut self, pen_ctx: &mut ToolContext<'_>) {
         if let Some(first_predicted_mg) = self.path_builder.first_predicted_mg {
             if let Some(Element::Path(p)) = pen_ctx.buffer.elements.get_mut(&self.current_id) {
+                p.diff_state.data_changed = true;
                 for n in (first_predicted_mg..p.data.manipulator_groups().len()).rev() {
                     trace!(n, "removing predicted touch at ");
                     p.data.remove_manipulator_group(n);

@@ -22,17 +22,22 @@ const WEAK_IMAGE_G_ID: &str = "lb_images";
 const WEAK_PATH_PRESSURES_G_ID: &str = "lb_path_pressures";
 const WEAK_VIEWPORT_SETTINGS_G_ID: &str = "lb_viewport_settings";
 
+#[cfg(test)]
+mod tests;
+
 #[derive(Default, Clone)]
 pub struct Buffer {
     pub elements: IndexMap<Uuid, Element>,
     pub weak_images: WeakImages,
     pub weak_path_pressures: WeakPathPressures,
+    /// Read-only compatibility data from drawings saved by older clients.
+    /// Never used to transform geometry or included in new serialization.
     pub weak_viewport_settings: WeakViewportSettings,
-    pub master_transform_changed: bool,
+    pub has_legacy_viewport: bool,
     pub id_map: HashMap<Uuid, String>,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
 pub struct WeakRect {
     pub min: (f32, f32),
     pub max: (f32, f32),
@@ -57,6 +62,8 @@ impl Buffer {
         let mut weak_images = WeakImages::default();
         let mut weak_path_pressures = WeakPathPressures::default();
         let mut weak_viewport_settings = WeakViewportSettings::default();
+        let has_legacy_viewport =
+            content.contains(WEAK_VIEWPORT_SETTINGS_G_ID) || content.contains(ZOOM_G_ID);
 
         let maybe_tree = usvg::Tree::from_str(content, &Options::default(), &Database::default());
 
@@ -77,21 +84,32 @@ impl Buffer {
             });
         }
 
+        if has_legacy_viewport {
+            // Older writers baked element edits into `d` while also writing
+            // the element transform. Preserve the geometry those clients saw.
+            // Their viewport was already removed when the document was saved.
+            for el in elements.values_mut() {
+                if let Element::Path(path) = el {
+                    path.data.apply_transform(u_transform_to_bezier(
+                        &path.transform.invert().unwrap_or_default(),
+                    ));
+                }
+            }
+        }
+
         Self {
             elements,
             id_map,
             weak_images,
             weak_viewport_settings,
             weak_path_pressures,
-            master_transform_changed: false,
+            has_legacy_viewport,
         }
     }
 
     pub fn reload(
         local_elements: &mut IndexMap<Uuid, Element>, local_weak_images: &mut WeakImages,
-        local_weak_pressures: &mut WeakPathPressures,
-        local_viewport_settings: &mut WeakViewportSettings, base_buffer: &Self,
-        remote_buffer: &Self,
+        local_weak_pressures: &mut WeakPathPressures, base_buffer: &Self, remote_buffer: &Self,
     ) {
         // todo: convert weak images
         for (id, base_img) in base_buffer.weak_images.iter() {
@@ -112,8 +130,6 @@ impl Buffer {
             }
         }
 
-        let local_master_transform = Transform::from(local_viewport_settings.master_transform);
-
         base_buffer
             .elements
             .iter()
@@ -123,11 +139,7 @@ impl Buffer {
                     if remote_path != base_path {
                         // this element was changed remotly
                         let mut transformed_path = remote_path.clone();
-                        transformed_path.diff_state.transformed = Some(local_master_transform);
                         transformed_path.diff_state.transformed = None;
-                        transformed_path
-                            .data
-                            .apply_transform(u_transform_to_bezier(&local_master_transform));
                         transformed_path.diff_state.data_changed = true;
 
                         local_elements.insert(*id, Element::Path(transformed_path.clone()));
@@ -151,11 +163,6 @@ impl Buffer {
             .for_each(|(i, (id, remote_el))| {
                 if !base_buffer.elements.contains_key(id) {
                     let mut transformed_path = remote_el.clone();
-                    transformed_path.diff_state.transformed = Some(local_master_transform);
-                    transformed_path
-                        .data
-                        .apply_transform(u_transform_to_bezier(&local_master_transform));
-
                     transformed_path.diff_state.data_changed = true;
                     transformed_path.diff_state.transformed = None;
 
@@ -203,24 +210,16 @@ impl Buffer {
         }
     }
     pub fn serialize(&self) -> String {
-        serialize_inner(
-            &self.id_map,
-            &self.elements,
-            &self.weak_viewport_settings,
-            &self.weak_images,
-            &self.weak_path_pressures,
-        )
+        serialize_inner(&self.id_map, &self.elements, &self.weak_images, &self.weak_path_pressures)
     }
 }
 
 pub fn serialize_inner(
     id_map: &HashMap<Uuid, String>, elements: &IndexMap<Uuid, Element>,
-    weak_viewport_settings: &WeakViewportSettings, buffer_weak_images: &WeakImages,
-    weak_pressures: &WeakPathPressures,
+    buffer_weak_images: &WeakImages, weak_pressures: &WeakPathPressures,
 ) -> String {
     let mut root = r#"<svg xmlns="http://www.w3.org/2000/svg">"#.into();
     let mut weak_images = WeakImages::default();
-    let master_transform = Transform::from(weak_viewport_settings.master_transform);
 
     for (index, el) in elements.iter().enumerate() {
         match el.1 {
@@ -232,24 +231,19 @@ pub fn serialize_inner(
                 // if it's empty then the curve will not be converted to string via bezier_rs
                 if let Some(stroke) = p.stroke {
                     curv_attrs = format!(
-                        "stroke-width='{}' stroke='rgba({},{},{},{})' fill='none' id='{}' transform='{}'",
-                        stroke.width,
+                        "stroke-width='{}' stroke='rgba({},{},{},{})' fill='none' id='{}'",
+                        stroke.width * p.stroke_scale(),
                         stroke.color.light.red,
                         stroke.color.light.green,
                         stroke.color.light.blue,
-                        stroke.opacity,
-                        id_map.get(el.0).unwrap_or(&el.0.to_string()),
-                        to_svg_transform(p.transform)
+                        stroke.opacity * p.opacity,
+                        id_map.get(el.0).unwrap_or(&el.0.to_string())
                     );
                 }
 
-                let mut data = p.data.clone();
-                data.apply_transform(u_transform_to_bezier(
-                    &master_transform.invert().unwrap_or_default(),
-                ));
-
-                if data.len() > 1 {
-                    data.to_svg(&mut root, curv_attrs, "".into(), "".into(), "".into())
+                if p.data.len() > 1 {
+                    p.data
+                        .to_svg(&mut root, curv_attrs, "".into(), "".into(), "".into())
                 }
             }
             Element::Image(img) => {
@@ -257,26 +251,12 @@ pub fn serialize_inner(
                     continue;
                 }
 
-                let mut weak_image: WeakImage = img.into_weak(index);
-
-                weak_image.transform(master_transform.invert().unwrap_or_default());
-
+                let weak_image: WeakImage = img.into_weak(index);
                 weak_images.insert(*el.0, weak_image);
             }
             Element::Text(_) => {}
         }
     }
-
-    let zoom_level = format!(
-        r#"<g id="{}" transform="matrix({} {} {} {} {} {})"></g>"#,
-        ZOOM_G_ID,
-        master_transform.sx,
-        master_transform.kx,
-        master_transform.ky,
-        master_transform.sy,
-        master_transform.tx,
-        master_transform.ty
-    );
 
     weak_images.extend(buffer_weak_images.iter());
 
@@ -297,15 +277,7 @@ pub fn serialize_inner(
         );
     }
 
-    let binary_data = bincode::serialize(&weak_viewport_settings).expect("Failed to serialize");
-    let base64_data = base64::encode(&binary_data);
-
-    let _ = write!(
-        &mut root,
-        "<g id=\"{WEAK_VIEWPORT_SETTINGS_G_ID}\"> <g id=\"{base64_data}\"></g></g>"
-    );
-
-    let _ = write!(&mut root, "{zoom_level} </svg>");
+    root.push_str("</svg>");
     root
 }
 
@@ -379,11 +351,7 @@ pub fn parse_child(
             } else {
                 None
             };
-            let mut data = usvg_d_to_subpath(path);
-
-            data.apply_transform(u_transform_to_bezier(
-                &path.abs_transform().invert().unwrap_or_default(),
-            ));
+            let data = usvg_d_to_subpath(path);
 
             elements.insert(
                 id,
@@ -549,11 +517,4 @@ pub fn u_transform_to_bezier(src: &Transform) -> DAffine2 {
         },
         translation: glam::DVec2 { x: src.tx.into(), y: src.ty.into() },
     }
-}
-
-fn to_svg_transform(transform: Transform) -> String {
-    format!(
-        "matrix({} {} {} {} {} {})",
-        transform.sx, transform.ky, transform.kx, transform.sy, transform.tx, transform.ty
-    )
 }
