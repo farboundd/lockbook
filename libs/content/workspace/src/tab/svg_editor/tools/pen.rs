@@ -269,9 +269,10 @@ impl Pen {
     }
 
     fn end(&mut self, pen_ctx: &mut ToolContext<'_>, payload: ToolPayload) {
+        let document_pos = pen_ctx.viewport_settings.screen_to_document(payload.pos);
         if let Some(Element::Path(path)) = pen_ctx.buffer.elements.get_mut(&self.current_id) {
             path.diff_state.data_changed = true;
-            self.path_builder.line_to(payload.pos, &mut path.data);
+            self.path_builder.line_to(document_pos, &mut path.data);
 
             self.path_builder.clear();
 

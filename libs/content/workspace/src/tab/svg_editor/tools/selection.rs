@@ -316,15 +316,10 @@ impl InputControllerTool for Selection {
                             let sy = new_height / container_rect.height();
                             let sx = new_width / container_rect.width();
 
-                            let s_uniform = (sx + sy) / 2.0;
-
                             let anchor = container_rect.right_top();
                             Transform::identity()
-                                .post_scale(s_uniform, s_uniform)
-                                .post_translate(
-                                    anchor.x * (1. - s_uniform),
-                                    anchor.y * (1. - s_uniform),
-                                )
+                                .post_scale(sx, sy)
+                                .post_translate(anchor.x * (1. - sx), anchor.y * (1. - sy))
                         }
                         SelectionOperation::NorthWestScale => {
                             let new_height =
@@ -335,15 +330,10 @@ impl InputControllerTool for Selection {
                             let sy = new_height / container_rect.height();
                             let sx = new_width / container_rect.width();
 
-                            let s_uniform = (sx + sy) / 2.0;
-
                             let anchor = container_rect.right_bottom();
                             Transform::identity()
-                                .post_scale(s_uniform, s_uniform)
-                                .post_translate(
-                                    anchor.x * (1. - s_uniform),
-                                    anchor.y * (1. - s_uniform),
-                                )
+                                .post_scale(sx, sy)
+                                .post_translate(anchor.x * (1. - sx), anchor.y * (1. - sy))
                         }
                         SelectionOperation::NorthEastScale => {
                             let new_height =
@@ -354,15 +344,10 @@ impl InputControllerTool for Selection {
                             let sy = new_height / container_rect.height();
                             let sx = new_width / container_rect.width();
 
-                            let s_uniform = (sx + sy) / 2.0;
-
                             let anchor = container_rect.left_bottom();
                             Transform::identity()
-                                .post_scale(s_uniform, s_uniform)
-                                .post_translate(
-                                    anchor.x * (1. - s_uniform),
-                                    anchor.y * (1. - s_uniform),
-                                )
+                                .post_scale(sx, sy)
+                                .post_translate(anchor.x * (1. - sx), anchor.y * (1. - sy))
                         }
                         SelectionOperation::SouthEastScale => {
                             let new_height =
@@ -373,15 +358,10 @@ impl InputControllerTool for Selection {
                             let sy = new_height / container_rect.height();
                             let sx = new_width / container_rect.width();
 
-                            let s_uniform = (sx + sy) / 2.0;
-
                             let anchor = container_rect.left_top();
                             Transform::identity()
-                                .post_scale(s_uniform, s_uniform)
-                                .post_translate(
-                                    anchor.x * (1. - s_uniform),
-                                    anchor.y * (1. - s_uniform),
-                                )
+                                .post_scale(sx, sy)
+                                .post_translate(anchor.x * (1. - sx), anchor.y * (1. - sy))
                         }
                         _ => snap_scale(pos, container_rect), // todod: figure out if this can be removed
                     };

@@ -1,9 +1,11 @@
 use super::element::BoundedElement;
 use super::history::TransformElement;
-use super::tools::{InputControllerTool, pen::PathEvent, shapes::ShapeEvent};
+use super::tools::{
+    DynInputControllerTool, InputControllerTool, pen::PathEvent, shapes::ShapeEvent,
+};
 use super::util::{transform_point, transform_rect};
 use super::*;
-use crate::tab::input_controller::ToolPayload;
+use crate::tab::input_controller::{InputControllerEvent, ToolPayload};
 use crate::theme::palette_v2::{Mode, Theme, ThemeExt};
 use egui::{Pos2, Rect, Vec2};
 
@@ -386,4 +388,223 @@ fn pen_and_shapes_store_document_coordinates() {
             );
         });
     });
+}
+
+fn input_at_density(density: f32) -> egui::RawInput {
+    let mut input = egui::RawInput::default();
+    input
+        .viewports
+        .get_mut(&egui::ViewportId::ROOT)
+        .unwrap()
+        .native_pixels_per_point = Some(density);
+    input
+}
+
+#[test]
+fn pen_release_keeps_the_endpoint_in_document_space() {
+    for density in [1.0, 2.0, 3.0] {
+        for zoom in [0.5, 2.0, 6.0] {
+            for release in [egui::pos2(200.0, 150.0), egui::pos2(220.0, 160.0)] {
+                let ctx = egui::Context::default();
+                let _ = ctx.run(input_at_density(density), |ctx| {
+                    assert_eq!(ctx.pixels_per_point(), density);
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        let mut buffer = Buffer::default();
+                        let mut view = viewport();
+                        view.master_transform =
+                            Transform::from_scale(zoom, zoom).post_translate(70.0, 90.0);
+                        let mut history = History::default();
+                        let mut settings = CanvasSettings::default();
+                        let mut painter = ui.painter().clone();
+                        let mut tool_ctx = ToolContext {
+                            buffer: &mut buffer,
+                            viewport_settings: &mut view,
+                            history: &mut history,
+                            settings: &mut settings,
+                            painter: &mut painter,
+                        };
+                        let mut pen = tools::pen::Pen::new(PenSettings::default_pen());
+                        let id = pen.current_id;
+                        for (index, document_pos) in
+                            [egui::pos2(100.0, 100.0), egui::pos2(200.0, 150.0)]
+                                .into_iter()
+                                .enumerate()
+                        {
+                            let payload = ToolPayload {
+                                pos: tool_ctx.viewport_settings.document_to_screen(document_pos),
+                                force: None,
+                                id: None,
+                            };
+                            let event = if index == 0 {
+                                InputControllerEvent::ToolStart(payload)
+                            } else {
+                                InputControllerEvent::ToolRun(payload)
+                            };
+                            pen.process_controller_event(ui, event, &mut tool_ctx);
+                        }
+                        // A predicted endpoint must be removed before the real release is added.
+                        let prediction = tool_ctx
+                            .viewport_settings
+                            .document_to_screen(egui::pos2(800.0, 900.0));
+                        pen.process_controller_event(
+                            ui,
+                            InputControllerEvent::ToolPredictedRun(prediction, None),
+                            &mut tool_ctx,
+                        );
+                        let pos = tool_ctx.viewport_settings.document_to_screen(release);
+                        pen.process_controller_event(
+                            ui,
+                            InputControllerEvent::ToolEnd(ToolPayload {
+                                pos,
+                                force: None,
+                                id: None,
+                            }),
+                            &mut tool_ctx,
+                        );
+                        let Element::Path(path) = &tool_ctx.buffer.elements[&id] else {
+                            panic!("expected a path");
+                        };
+                        let endpoint = path.data.manipulator_groups().last().unwrap().anchor;
+                        assert_point(egui::pos2(endpoint.x as f32, endpoint.y as f32), release);
+                        assert_point(path.bounding_box().min, egui::pos2(100.0, 100.0));
+                        assert_point(path.bounding_box().max, release);
+                        let saved = Buffer::new(&tool_ctx.buffer.serialize());
+                        assert_point(saved.elements[&id].bounding_box().max, release);
+                        tool_ctx.history.undo(tool_ctx.buffer);
+                        assert!(tool_ctx.buffer.elements[&id].deleted());
+                        tool_ctx.history.redo(tool_ctx.buffer);
+                        assert_point(tool_ctx.buffer.elements[&id].bounding_box().max, release);
+                    });
+                });
+            }
+        }
+    }
+}
+
+#[test]
+fn selection_handles_follow_the_cursor_at_any_zoom_and_density() {
+    use super::tools::selection::{SelectionEvent, SelectionOperation};
+    use SelectionOperation::*;
+
+    fn handle_and_anchor(rect: Rect, op: SelectionOperation) -> (Pos2, Pos2) {
+        match op {
+            NorthWestScale => (rect.left_top(), rect.right_bottom()),
+            NorthEastScale => (rect.right_top(), rect.left_bottom()),
+            SouthWestScale => (rect.left_bottom(), rect.right_top()),
+            SouthEastScale => (rect.right_bottom(), rect.left_top()),
+            NorthScale => (rect.center_top(), rect.center_bottom()),
+            SouthScale => (rect.center_bottom(), rect.center_top()),
+            WestScale => (rect.left_center(), rect.right_center()),
+            EastScale => (rect.right_center(), rect.left_center()),
+            _ => panic!("expected a resize operation"),
+        }
+    }
+
+    for density in [1.0, 2.0, 3.0] {
+        for zoom in [0.5, 2.0, 6.0] {
+            for op in [
+                NorthWestScale,
+                NorthEastScale,
+                SouthWestScale,
+                SouthEastScale,
+                NorthScale,
+                SouthScale,
+                WestScale,
+                EastScale,
+            ] {
+                let ctx = egui::Context::default();
+                let _ = ctx.run(input_at_density(density), |ctx| {
+                    assert_eq!(ctx.pixels_per_point(), density);
+                    ctx.set_lb_theme(Theme::default(Mode::Dark));
+                    crate::register_font_system(ctx);
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        let mut buffer = Buffer::new(&DRAWING.replace("L200 200", "L300 180"));
+                        let id = *buffer.elements.keys().next().unwrap();
+                        let before = buffer.elements[&id].bounding_box();
+                        let mut view = viewport();
+                        view.master_transform =
+                            Transform::from_scale(zoom, zoom).post_translate(70.0, 90.0);
+                        let mut history = History::default();
+                        let mut settings = CanvasSettings::default();
+                        let mut painter = ui.painter().clone();
+                        let mut tool_ctx = ToolContext {
+                            buffer: &mut buffer,
+                            viewport_settings: &mut view,
+                            history: &mut history,
+                            settings: &mut settings,
+                            painter: &mut painter,
+                        };
+                        let mut selection = tools::selection::Selection::default();
+                        selection.handle_tool_event(ui, SelectionEvent::SelectAll, &mut tool_ctx);
+                        InputControllerTool::show_tool_ui(&mut selection, ui, &mut tool_ctx);
+                        let rect = tool_ctx.viewport_settings.document_rect_to_screen(before);
+                        let (handle, anchor) = handle_and_anchor(rect, op);
+                        let start = InputControllerEvent::ToolStart(ToolPayload {
+                            pos: handle,
+                            force: None,
+                            id: None,
+                        });
+                        assert!(matches!(
+                            selection.controller_event_to_tool_event(start),
+                            Some(SelectionEvent::StartTransform(actual)) if actual == op
+                        ));
+                        selection.process_controller_event(ui, start, &mut tool_ctx);
+                        // Deliberately unequal axis changes expose averaged uniform scaling.
+                        let delta = egui::vec2(
+                            if handle.x == anchor.x {
+                                0.0
+                            } else {
+                                (handle.x - anchor.x).signum() * 43.0
+                            },
+                            if handle.y == anchor.y {
+                                0.0
+                            } else {
+                                (handle.y - anchor.y).signum() * 29.0
+                            },
+                        );
+                        for step in [1.0, 2.0] {
+                            let pos = handle + delta * step;
+                            selection.process_controller_event(
+                                ui,
+                                InputControllerEvent::ToolRun(ToolPayload {
+                                    pos,
+                                    force: None,
+                                    id: None,
+                                }),
+                                &mut tool_ctx,
+                            );
+                            let rect = tool_ctx.viewport_settings.document_rect_to_screen(
+                                tool_ctx.buffer.elements[&id].bounding_box(),
+                            );
+                            let (actual_handle, actual_anchor) = handle_and_anchor(rect, op);
+                            assert_point(actual_handle, pos);
+                            assert_point(actual_anchor, anchor);
+                        }
+                        selection.process_controller_event(
+                            ui,
+                            InputControllerEvent::ToolEnd(ToolPayload {
+                                pos: handle + delta * 2.0,
+                                force: None,
+                                id: None,
+                            }),
+                            &mut tool_ctx,
+                        );
+                        let after = tool_ctx.buffer.elements[&id].bounding_box();
+                        transform_canvas(
+                            tool_ctx.viewport_settings,
+                            Transform::from_scale(3.0, 3.0),
+                        );
+                        tool_ctx.history.undo(tool_ctx.buffer);
+                        let undone = tool_ctx.buffer.elements[&id].bounding_box();
+                        assert_point(undone.min, before.min);
+                        assert_point(undone.max, before.max);
+                        tool_ctx.history.redo(tool_ctx.buffer);
+                        let redone = tool_ctx.buffer.elements[&id].bounding_box();
+                        assert_point(redone.min, after.min);
+                        assert_point(redone.max, after.max);
+                    });
+                });
+            }
+        }
+    }
 }
