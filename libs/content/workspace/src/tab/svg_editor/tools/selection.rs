@@ -247,7 +247,9 @@ impl InputControllerTool for Selection {
                 self.current_op = op;
             }
             SelectionEvent::Transform(pos) => {
-                let container_rect = self.get_container_rect(selection_ctx.buffer);
+                let container_rect = selection_ctx
+                    .viewport_settings
+                    .document_rect_to_screen(self.get_container_rect(selection_ctx.buffer));
 
                 let min_allowed = egui::vec2(10.0, 10.0);
 
@@ -314,15 +316,10 @@ impl InputControllerTool for Selection {
                             let sy = new_height / container_rect.height();
                             let sx = new_width / container_rect.width();
 
-                            let s_uniform = (sx + sy) / 2.0;
-
                             let anchor = container_rect.right_top();
                             Transform::identity()
-                                .post_scale(s_uniform, s_uniform)
-                                .post_translate(
-                                    anchor.x * (1. - s_uniform),
-                                    anchor.y * (1. - s_uniform),
-                                )
+                                .post_scale(sx, sy)
+                                .post_translate(anchor.x * (1. - sx), anchor.y * (1. - sy))
                         }
                         SelectionOperation::NorthWestScale => {
                             let new_height =
@@ -333,15 +330,10 @@ impl InputControllerTool for Selection {
                             let sy = new_height / container_rect.height();
                             let sx = new_width / container_rect.width();
 
-                            let s_uniform = (sx + sy) / 2.0;
-
                             let anchor = container_rect.right_bottom();
                             Transform::identity()
-                                .post_scale(s_uniform, s_uniform)
-                                .post_translate(
-                                    anchor.x * (1. - s_uniform),
-                                    anchor.y * (1. - s_uniform),
-                                )
+                                .post_scale(sx, sy)
+                                .post_translate(anchor.x * (1. - sx), anchor.y * (1. - sy))
                         }
                         SelectionOperation::NorthEastScale => {
                             let new_height =
@@ -352,15 +344,10 @@ impl InputControllerTool for Selection {
                             let sy = new_height / container_rect.height();
                             let sx = new_width / container_rect.width();
 
-                            let s_uniform = (sx + sy) / 2.0;
-
                             let anchor = container_rect.left_bottom();
                             Transform::identity()
-                                .post_scale(s_uniform, s_uniform)
-                                .post_translate(
-                                    anchor.x * (1. - s_uniform),
-                                    anchor.y * (1. - s_uniform),
-                                )
+                                .post_scale(sx, sy)
+                                .post_translate(anchor.x * (1. - sx), anchor.y * (1. - sy))
                         }
                         SelectionOperation::SouthEastScale => {
                             let new_height =
@@ -371,15 +358,10 @@ impl InputControllerTool for Selection {
                             let sy = new_height / container_rect.height();
                             let sx = new_width / container_rect.width();
 
-                            let s_uniform = (sx + sy) / 2.0;
-
                             let anchor = container_rect.left_top();
                             Transform::identity()
-                                .post_scale(s_uniform, s_uniform)
-                                .post_translate(
-                                    anchor.x * (1. - s_uniform),
-                                    anchor.y * (1. - s_uniform),
-                                )
+                                .post_scale(sx, sy)
+                                .post_translate(anchor.x * (1. - sx), anchor.y * (1. - sy))
                         }
                         _ => snap_scale(pos, container_rect), // todod: figure out if this can be removed
                     };
@@ -390,6 +372,9 @@ impl InputControllerTool for Selection {
                     }
 
                     if let Some(el) = selection_ctx.buffer.elements.get_mut(&s_el.id) {
+                        let transform = selection_ctx
+                            .viewport_settings
+                            .screen_transform_to_document(transform);
                         el.transform(transform);
                         s_el.transform = s_el.transform.post_concat(transform);
                     }
@@ -453,9 +438,14 @@ impl InputControllerTool for Selection {
 
                     self.new_selection_els(new_els);
                     self.current_op = SelectionOperation::Translation;
-                } else if let Some(maybe_new_selection) =
-                    detect_translation(selection_ctx.buffer, None, build_payload.pos)
-                {
+                } else if let Some(maybe_new_selection) = detect_translation(
+                    selection_ctx.buffer,
+                    None,
+                    selection_ctx
+                        .viewport_settings
+                        .screen_to_document(build_payload.pos),
+                    10.0 / selection_ctx.viewport_settings.master_transform.sx as f64,
+                ) {
                     if build_payload.modifiers.shift_only() {
                         self.push_selection_el(maybe_new_selection);
                     } else if build_payload.modifiers.command_only() {
@@ -481,7 +471,14 @@ impl InputControllerTool for Selection {
             }
             SelectionEvent::LasoBuild(build_payload) => {
                 if let SelectionOperation::LasoBuild(build_origin) = self.current_op {
-                    let rect = get_laso_rect(build_payload.pos, build_origin.pos);
+                    let rect = get_laso_rect(
+                        selection_ctx
+                            .viewport_settings
+                            .screen_to_document(build_payload.pos),
+                        selection_ctx
+                            .viewport_settings
+                            .screen_to_document(build_origin.pos),
+                    );
                     self.laso_rect = Some(rect);
 
                     let new_selection_els = self.get_laso_selected_els(selection_ctx);
@@ -526,7 +523,9 @@ impl InputControllerTool for Selection {
                 ui.set_clip_rect(selection_ctx.viewport_settings.working_rect);
                 if let Some(laso_rect) = self.laso_rect {
                     ui.painter().rect_filled(
-                        laso_rect,
+                        selection_ctx
+                            .viewport_settings
+                            .document_rect_to_screen(laso_rect),
                         0.0,
                         ui.visuals().widgets.active.bg_fill.linear_multiply(0.1),
                     );
@@ -635,7 +634,9 @@ impl Selection {
             self.layout.popover = None;
             return;
         }
-        let container = self.get_container_rect(selection_ctx.buffer);
+        let container = selection_ctx
+            .viewport_settings
+            .document_rect_to_screen(self.get_container_rect(selection_ctx.buffer));
 
         if self.current_op != SelectionOperation::Translation
             && self.selection_stroke_snashot.is_empty()
@@ -643,7 +644,9 @@ impl Selection {
         {
             for el in self.selected_elements.iter() {
                 let child = match selection_ctx.buffer.elements.get(&el.id) {
-                    Some(el) => el.bounding_box(),
+                    Some(el) => selection_ctx
+                        .viewport_settings
+                        .document_rect_to_screen(el.bounding_box()),
                     None => continue,
                 };
                 if self.selected_elements.len() != 1 {
@@ -816,7 +819,6 @@ impl Selection {
         let serialized_selection = serialize_inner(
             id_map,
             &elements,
-            &selection_ctx.buffer.weak_viewport_settings,
             &WeakImages::default(),
             &selection_ctx.buffer.weak_path_pressures,
         );
@@ -1140,6 +1142,11 @@ impl Selection {
                             .buffer
                             .elements
                             .move_index(el_id, selection_ctx.buffer.elements.len() - 1);
+                        if let Some(el) =
+                            selection_ctx.buffer.elements.get_mut(&selected_element.id)
+                        {
+                            el.mark_data_change();
+                        }
                     }
                 });
             }
@@ -1165,6 +1172,11 @@ impl Selection {
                     {
                         if el_id < selection_ctx.buffer.elements.len() - 1 {
                             selection_ctx.buffer.elements.swap_indices(el_id, el_id + 1);
+                            if let Some(el) =
+                                selection_ctx.buffer.elements.get_mut(&selected_element.id)
+                            {
+                                el.mark_data_change();
+                            }
                         }
                     }
                 });
@@ -1193,6 +1205,11 @@ impl Selection {
                     {
                         if el_id > 0 {
                             selection_ctx.buffer.elements.swap_indices(el_id, el_id - 1);
+                            if let Some(el) =
+                                selection_ctx.buffer.elements.get_mut(&selected_element.id)
+                            {
+                                el.mark_data_change();
+                            }
                         }
                     }
                 });
@@ -1220,6 +1237,11 @@ impl Selection {
                         selection_ctx.buffer.elements.get_full(&selected_element.id)
                     {
                         selection_ctx.buffer.elements.move_index(el_id, 0);
+                        if let Some(el) =
+                            selection_ctx.buffer.elements.get_mut(&selected_element.id)
+                        {
+                            el.mark_data_change();
+                        }
                     }
                 });
             }
@@ -1268,13 +1290,13 @@ fn get_laso_rect(current: egui::Pos2, drag_origin: egui::Pos2) -> egui::Rect {
 }
 
 pub fn detect_translation(
-    buffer: &mut Buffer, last_pos: Option<egui::Pos2>, current_pos: egui::Pos2,
+    buffer: &mut Buffer, last_pos: Option<egui::Pos2>, current_pos: egui::Pos2, tolerance: f64,
 ) -> Option<SelectedElement> {
     for (id, el) in buffer.elements.iter() {
         if el.deleted() {
             continue;
         }
-        if pointer_intersects_element(el, current_pos, last_pos, 10.0) {
+        if pointer_intersects_element(el, current_pos, last_pos, tolerance) {
             return Some(SelectedElement { id: *id, transform: Transform::identity() });
         }
     }

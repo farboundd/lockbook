@@ -1,6 +1,6 @@
 use indexmap::IndexMap;
 use lb_rs::Uuid;
-use lb_rs::model::svg::buffer::{Buffer, u_transform_to_bezier};
+use lb_rs::model::svg::buffer::Buffer;
 use lb_rs::model::svg::diff::DiffState;
 use lb_rs::model::svg::element::{Element, Image, WeakPathPressures};
 use resvg::usvg::{NonZeroRect, Transform};
@@ -69,7 +69,12 @@ impl SVGEditor {
                         }
                         .unwrap_or_default();
 
-                        let fitted_img_rect = transform_rect(img_rect, transform);
+                        let fitted_img_rect = self
+                            .viewport_settings
+                            .screen_rect_to_document(transform_rect(img_rect, transform));
+                        let transform = self
+                            .viewport_settings
+                            .screen_transform_to_document(transform);
 
                         let id = Uuid::new_v4();
                         self.buffer.elements.insert(
@@ -109,8 +114,7 @@ impl SVGEditor {
                     }
                     let mut pasted_buffer = Buffer::new(payload);
 
-                    pasted_buffer
-                        .promote_weak_images(self.viewport_settings.master_transform, &self.lb);
+                    pasted_buffer.promote_weak_images(&self.lb);
 
                     if !pasted_buffer.elements.is_empty() || !pasted_buffer.weak_images.is_empty() {
                         let mut container = egui::Rect::NOTHING;
@@ -129,15 +133,9 @@ impl SVGEditor {
                                 .last_touch
                                 .unwrap_or(ui.available_rect_before_wrap().center()),
                         );
-                        let delta = paste_pos
-                            - container.center() * self.viewport_settings.master_transform.sx;
-
-                        let transform = Transform::identity()
-                            .post_scale(
-                                self.viewport_settings.master_transform.sx,
-                                self.viewport_settings.master_transform.sy,
-                            )
-                            .post_translate(delta.x, delta.y);
+                        let delta = self.viewport_settings.screen_to_document(paste_pos)
+                            - container.center();
+                        let transform = Transform::from_translate(delta.x, delta.y);
 
                         let new_ids = duplicate_elements(
                             pasted_buffer.elements,
@@ -177,20 +175,10 @@ pub fn duplicate_elements(
         }
 
         if let Some(transform) = maybe_transform {
-            match &mut new_el {
-                Element::Path(path) => {
-                    path.data.apply_transform(u_transform_to_bezier(&transform));
-                    path.diff_state = DiffState::new();
-                }
-                Element::Image(image) => {
-                    if let Some(new_vbox) = image.view_box.transform(transform) {
-                        image.view_box = new_vbox;
-                    };
-                    image.diff_state = DiffState::new();
-                }
-                Element::Text(_) => {}
-            }
+            new_el.transform(transform);
         }
+
+        new_el.mark_data_change();
 
         target.elements.insert_before(0, new_id, new_el);
 

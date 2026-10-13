@@ -63,6 +63,9 @@ impl InputControllerTool for Eraser {
             EraseEvent::Build(pos) => {
                 self.is_building = true;
                 self.pos = pos;
+                let document_pos = eraser_ctx.viewport_settings.screen_to_document(pos);
+                let document_radius =
+                    self.radius / eraser_ctx.viewport_settings.master_transform.sx;
 
                 eraser_ctx
                     .buffer
@@ -73,7 +76,12 @@ impl InputControllerTool for Eraser {
                         if self.delete_candidates.contains_key(id) {
                             return;
                         }
-                        if pointer_intersects_element(el, pos, None, self.radius as f64) {
+                        if pointer_intersects_element(
+                            el,
+                            document_pos,
+                            None,
+                            document_radius as f64,
+                        ) {
                             self.delete_candidates.insert(*id, el.opacity());
                         }
                     });

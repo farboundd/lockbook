@@ -82,6 +82,7 @@ impl InputControllerTool for ShapesTool {
                 self.reset_build();
             }
             ShapeEvent::Build(pos) => {
+                let pos = shapes_ctx.viewport_settings.screen_to_document(pos);
                 if self.build_origin.is_none() {
                     self.build_origin = Some(pos);
                 }
@@ -121,7 +122,7 @@ impl InputControllerTool for ShapesTool {
                         deleted: false,
                     });
 
-                    shapes_ctx.buffer.elements.insert_before(0, current_id, el);
+                    shapes_ctx.buffer.insert(current_id, el);
                 }
             }
         }

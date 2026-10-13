@@ -95,6 +95,12 @@ pub struct ToolbarContext<'a> {
     pub read_only: bool,
 }
 
+impl Toolbar {
+    pub(super) fn invalidate_document(&mut self) {
+        self.renderer.request_rerender = true;
+    }
+}
+
 impl ViewportSettings {
     pub fn update_working_rect(
         &mut self, settings: CanvasSettings, buffer: &Buffer, diff_state: &DiffState,
@@ -102,7 +108,7 @@ impl ViewportSettings {
     ) {
         let is_scroll_mode = self.is_scroll_mode();
         if let Some(mut new_bounded_rect) = self.bounded_rect {
-            if diff_state.is_dirty() && diff_state.transformed.is_none() {
+            if diff_state.is_dirty() {
                 if let Some(elements_bounds) = calc_elements_bounds(buffer) {
                     if is_scroll_mode {
                         new_bounded_rect.max.y = elements_bounds.max.y
@@ -111,6 +117,9 @@ impl ViewportSettings {
                     }
                 }
             }
+
+            self.bounded_rect = Some(new_bounded_rect);
+            let new_bounded_rect = self.document_rect_to_screen(new_bounded_rect);
 
             let min_x = if self.left_locked {
                 new_bounded_rect.left().max(self.container_rect.left())
@@ -144,9 +153,10 @@ impl ViewportSettings {
                 self.container_rect.bottom()
             };
 
-            self.bounded_rect = Some(new_bounded_rect);
-            self.working_rect =
-                egui::Rect::from_min_max(egui::pos2(min_x, min_y), egui::pos2(max_x, max_y));
+            self.working_rect = egui::Rect::from_min_max(
+                egui::pos2(min_x, min_y),
+                egui::pos2(max_x.max(min_x), max_y.max(min_y)),
+            );
         } else {
             self.working_rect = self.container_rect;
         };

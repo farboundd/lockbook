@@ -19,17 +19,20 @@ pub enum Element {
 
 #[derive(Clone)]
 pub struct Path {
+    /// Geometry in document coordinates; independent of every editor viewport.
     pub data: Subpath<ManipulatorGroupId>,
     pub visibility: Visibility,
     pub fill: Option<Fill>,
     pub stroke: Option<Stroke>,
+    /// Accumulated element edits, used to scale stroke width. Geometry already
+    /// contains these edits; rendering must not apply this matrix again.
     pub transform: Transform,
     pub diff_state: DiffState,
     pub deleted: bool,
     pub opacity: f32,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Stroke {
     pub color: DynamicColor,
     pub opacity: f32,
@@ -77,10 +80,19 @@ impl Default for DynamicColor {
 
 impl PartialEq for Path {
     fn eq(&self, other: &Self) -> bool {
-        self.data.len() == other.data.len()
+        self.data == other.data
             && self.visibility == other.visibility
             && self.transform == other.transform
             && self.deleted == other.deleted
+            && self.stroke == other.stroke
+            && self.opacity == other.opacity
+    }
+}
+
+impl Path {
+    pub fn stroke_scale(&self) -> f32 {
+        (self.transform.sx.hypot(self.transform.ky) + self.transform.kx.hypot(self.transform.sy))
+            / 2.0
     }
 }
 
@@ -164,6 +176,10 @@ impl PartialEq for WeakImage {
             && self.transform == other.transform
             && self.opacity == other.opacity
             && self.z_index == other.z_index
+            && self.x == other.x
+            && self.y == other.y
+            && self.width == other.width
+            && self.height == other.height
     }
 }
 

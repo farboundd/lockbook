@@ -8,7 +8,6 @@ use lb_rs::model::errors::{LbErr, LbErrKind, Unexpected};
 use lb_rs::model::file::File;
 use lb_rs::model::file_metadata::FileType;
 use lb_rs::model::filename::NameComponents;
-use lb_rs::model::svg;
 use lb_rs::model::svg::buffer::Buffer;
 use lb_rs::service::events::{self, Actor, Event};
 use lb_rs::{LbResult, Uuid, spawn};
@@ -621,6 +620,9 @@ impl Workspace {
 
     /// Persist (and stop) the current content before this session's dest changes.
     fn persist_tab_content(&mut self, tab_id: SessionId) {
+        if let Some(svg) = self.tabs.get_mut(&tab_id).and_then(|tab| tab.svg_mut()) {
+            svg.flush_viewport();
+        }
         #[cfg(not(target_family = "wasm"))]
         if let Some(tab) = self.tabs.get_mut(&tab_id) {
             if let ContentState::Open(TabContent::MindMap(mm)) = &mut tab.content {
@@ -840,6 +842,9 @@ impl Workspace {
     pub fn close_tab(&mut self, i: usize) {
         let Some(slot) = self.tab_strip.get(i) else { return };
         let tab_id = slot.id;
+        if let Some(svg) = self.tabs.get_mut(&tab_id).and_then(|tab| tab.svg_mut()) {
+            svg.flush_viewport();
+        }
         #[cfg(not(target_family = "wasm"))]
         if let Some(tab) = self.tabs.get_mut(&tab_id) {
             if let ContentState::Open(TabContent::MindMap(mm)) = &mut tab.content {
@@ -1273,18 +1278,10 @@ impl Workspace {
                             } else {
                                 let svg = tab.svg_mut().unwrap();
 
-                                Buffer::reload(
-                                    &mut svg.buffer.elements,
-                                    &mut svg.buffer.weak_images,
-                                    &mut svg.buffer.weak_path_pressures,
-                                    &mut svg.buffer.weak_viewport_settings,
-                                    &svg.opened_content,
-                                    &svg::buffer::Buffer::new(
-                                        String::from_utf8_lossy(&bytes).as_ref(),
-                                    ),
+                                svg.reload_document(
+                                    String::from_utf8_lossy(&bytes).as_ref(),
+                                    maybe_hmac,
                                 );
-
-                                svg.open_file_hmac = maybe_hmac;
                             }
                         }
                         #[cfg(not(target_family = "wasm"))]
@@ -1415,7 +1412,9 @@ impl Workspace {
                                 } else if let Some(svg) = tab.svg_mut() {
                                     if let TabSaveContent::Svg(content) = content {
                                         svg.open_file_hmac = Some(hmac);
-                                        svg.opened_content = *content;
+                                        // The merge base must match the representation written
+                                        // to disk (including baked element stroke scaling).
+                                        svg.opened_content = Buffer::new(&content.serialize());
                                     }
                                 } else {
                                     #[cfg(not(target_family = "wasm"))]
@@ -1740,6 +1739,8 @@ pub struct WsPresistentData {
     #[serde(default)]
     current_tab_index: Option<usize>,
     canvas: CanvasSettings,
+    #[serde(default)]
+    pub canvas_files: HashMap<Uuid, crate::tab::svg_editor::CanvasFilePersistence>,
     pub markdown: MdPersistence,
     auto_save: bool,
     auto_sync: bool,
@@ -1771,6 +1772,7 @@ impl Default for WsPresistentData {
             current_tab_index: None,
             open_in_new_tab: true,
             canvas: CanvasSettings::default(),
+            canvas_files: HashMap::default(),
             markdown: MdPersistence::default(),
             landing_page: LandingPage::default(),
             zoom_factor: 1.,

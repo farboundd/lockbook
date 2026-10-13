@@ -5,9 +5,12 @@ mod history;
 mod viewport;
 
 mod renderer;
+#[cfg(test)]
+mod tests;
 pub(super) mod toolbar;
 pub(super) mod tools;
 mod util;
+pub use viewport::CanvasFilePersistence;
 
 use egui::UiBuilder;
 use web_time::Instant;
@@ -28,7 +31,7 @@ pub use history::{DeleteElement, Event, InsertElement};
 use lb_rs::Uuid;
 use lb_rs::blocking::Lb;
 use lb_rs::model::file_metadata::DocumentHmac;
-use lb_rs::model::svg::buffer::{Buffer, u_transform_to_bezier};
+use lb_rs::model::svg::buffer::Buffer;
 use lb_rs::model::svg::diff::DiffState;
 use lb_rs::model::svg::element::{DynamicColor, Element};
 use renderer::Renderer;
@@ -61,15 +64,17 @@ pub struct SVGEditor {
     input_ctx: InputContext,
 
     read_only: bool,
+    viewport_initialized: bool,
+    pending_viewport: Option<CanvasFilePersistence>,
+    viewport_write_pending: Option<Instant>,
 }
 #[derive(Debug, Clone, Copy)]
 pub struct ViewportSettings {
-    /// the drawable rect in the viewport-transformed plane.
+    /// The drawable bounds in document coordinates.
     /// **only defined if there's a lock**
     pub bounded_rect: Option<egui::Rect>,
     /// the intersection of the bounded rect and the current screen rect
     pub working_rect: egui::Rect,
-    pub viewport_transform: Option<Transform>,
     pub master_transform: Transform,
     container_rect: egui::Rect,
     pub left_locked: bool,
@@ -83,7 +88,6 @@ impl Default for ViewportSettings {
         Self {
             bounded_rect: None,
             working_rect: egui::Rect::ZERO,
-            viewport_transform: None,
             master_transform: Transform::identity(),
             left_locked: false,
             right_locked: false,
@@ -146,36 +150,93 @@ enum BackgroundOverlay {
 }
 
 impl SVGEditor {
+    pub(crate) fn reload_document(&mut self, content: &str, hmac: Option<DocumentHmac>) {
+        let remote = Buffer::new(content);
+        Buffer::reload(
+            &mut self.buffer.elements,
+            &mut self.buffer.weak_images,
+            &mut self.buffer.weak_path_pressures,
+            &self.opened_content,
+            &remote,
+        );
+        self.buffer.promote_weak_images(&self.lb);
+        self.viewport_settings.update_working_rect(
+            self.settings,
+            &self.buffer,
+            &DiffState::new(),
+            self.toolbar.hide_overlay,
+        );
+        self.renderer.request_rerender = true;
+        self.toolbar.invalidate_document();
+        self.opened_content = remote;
+        self.open_file_hmac = hmac;
+    }
+
+    fn persist_viewport(&mut self, ctx: &egui::Context) {
+        if !self.viewport_initialized {
+            return;
+        }
+        let state = self.viewport_settings.snapshot();
+        if !state.is_valid() {
+            return;
+        }
+        {
+            let mut data = self.cfg.data.write().unwrap();
+            if data.canvas_files.get(&self.open_file) != Some(&state) {
+                data.canvas_files.insert(self.open_file, state);
+                self.viewport_write_pending = Some(Instant::now());
+            }
+        }
+        if let Some(changed) = self.viewport_write_pending {
+            let debounce = std::time::Duration::from_millis(150);
+            if changed.elapsed() >= debounce {
+                self.flush_viewport();
+            } else {
+                ctx.request_repaint_after(debounce.saturating_sub(changed.elapsed()));
+            }
+        }
+    }
+
+    pub(crate) fn flush_viewport(&mut self) {
+        if self.viewport_write_pending.take().is_some() {
+            self.cfg.write_to_file();
+        }
+    }
+
     pub fn new(
         bytes: &[u8], ctx: &egui::Context, lb: lb_rs::blocking::Lb, open_file: Uuid,
         hmac: Option<DocumentHmac>, cfg: &WsPersistentStore, read_only: bool,
     ) -> Self {
         let content = std::str::from_utf8(bytes).unwrap();
 
-        let mut buffer = Buffer::new(content);
-        let mut viewport_settings = ViewportSettings::from(buffer.weak_viewport_settings);
-
-        for (_, el) in buffer.elements.iter_mut() {
-            if let Element::Path(path) = el {
-                path.data
-                    .apply_transform(u_transform_to_bezier(&viewport_settings.master_transform));
-            }
-        }
+        let buffer = Buffer::new(content);
+        let mut viewport_settings = ViewportSettings::default();
 
         let elements_count = buffer.elements.len();
 
         let mut cfg = cfg.clone();
         let settings = cfg.get_canvas_settings();
+        let pending_viewport = cfg
+            .data
+            .read()
+            .unwrap()
+            .canvas_files
+            .get(&open_file)
+            .copied()
+            .filter(CanvasFilePersistence::is_valid);
 
         let toolbar = Toolbar::new(elements_count, &settings);
 
-        if viewport_settings.master_transform == Transform::identity() && buffer.elements.is_empty()
-        {
+        if buffer.has_legacy_viewport {
+            viewport_settings.restore_legacy(buffer.weak_viewport_settings);
+            if viewport_settings.bounded_rect.is_none() {
+                viewport_settings.bounded_rect = viewport::calc_elements_bounds(&buffer);
+            }
+        } else {
             viewport_settings.bottom_locked = settings.bottom_locked;
             viewport_settings.left_locked = settings.left_locked;
             viewport_settings.right_locked = settings.right_locked;
             viewport_settings.top_locked = settings.top_locked;
-            viewport_settings.bounded_rect = Some(ctx.available_rect());
         }
 
         if read_only {
@@ -207,34 +268,82 @@ impl SVGEditor {
                 settings.pencil_only_drawing,
                 read_only,
             )),
+            viewport_initialized: false,
+            pending_viewport,
+            viewport_write_pending: None,
         }
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui) -> Response {
         set_style(ui);
 
-        self.viewport_settings.container_rect = ui.available_rect_before_wrap();
-        self.input_ctx.update(ui);
-        self.buffer.weak_viewport_settings = self.viewport_settings.into();
-
-        let non_empty_weak_imaegs = !self.buffer.weak_images.is_empty();
-        self.buffer
-            .promote_weak_images(self.viewport_settings.master_transform, &self.lb);
-
-        let request_diff_change = self.show_toolbar(ui);
-
-        if !request_diff_change {
-            for (_, el) in &mut self.buffer.elements {
-                match el {
-                    Element::Path(p) => p.diff_state = DiffState::default(),
-                    Element::Image(i) => i.diff_state = DiffState::default(),
-                    Element::Text(_) => todo!(),
+        self.buffer.promote_weak_images(&self.lb);
+        let container = ui.available_rect_before_wrap();
+        if container.is_finite() && container.is_positive() {
+            let previous_center = self.viewport_settings.container_rect.center();
+            self.viewport_settings.container_rect = container;
+            if !self.viewport_initialized {
+                if let Some(state) = self.pending_viewport.take() {
+                    self.viewport_settings.restore(state);
+                    self.viewport_settings.update_working_rect(
+                        self.settings,
+                        &self.buffer,
+                        &DiffState::new(),
+                        self.toolbar.hide_overlay,
+                    );
+                } else if self.buffer.has_legacy_viewport {
+                    let mut state = self.viewport_settings.snapshot();
+                    state.zoom = state.zoom.max(viewport::MIN_ZOOM_LEVEL);
+                    self.viewport_settings.restore(state);
+                } else {
+                    if let Some(bounds) = viewport::calc_elements_bounds(&self.buffer) {
+                        self.viewport_settings.bounded_rect = Some(bounds);
+                        if let Some(transform) =
+                            viewport::get_zoom_fit_transform(&self.viewport_settings)
+                        {
+                            transform_canvas(&mut self.viewport_settings, transform);
+                        }
+                    } else {
+                        self.viewport_settings.bounded_rect =
+                            Some(self.viewport_settings.screen_rect_to_document(container));
+                    }
                 }
+                self.viewport_initialized = true;
+            } else if previous_center != container.center() {
+                let delta = container.center() - previous_center;
+                transform_canvas(
+                    &mut self.viewport_settings,
+                    Transform::from_translate(delta.x, delta.y),
+                );
             }
         }
+        self.input_ctx.update(ui);
+
+        self.viewport_settings.update_working_rect(
+            self.settings,
+            &self.buffer,
+            &DiffState::default(),
+            self.toolbar.hide_overlay,
+        );
+
+        for el in self.buffer.elements.values_mut() {
+            match el {
+                Element::Path(p) => p.diff_state = DiffState::default(),
+                Element::Image(i) => i.diff_state = DiffState::default(),
+                Element::Text(_) => todo!(),
+            }
+        }
+        self.show_toolbar(ui);
         self.input_controller.sync_canvas_settings(&self.settings);
 
         self.process_events(ui);
+
+        self.viewport_settings.update_working_rect(
+            self.settings,
+            &self.buffer,
+            &DiffState::default(),
+            self.toolbar.hide_overlay,
+        );
 
         self.painter = ui.painter_at(self.viewport_settings.working_rect);
 
@@ -254,9 +363,6 @@ impl SVGEditor {
             self.toolbar.hide_overlay,
         );
 
-        if non_empty_weak_imaegs {
-            self.has_queued_save_request = true;
-        }
         if global_diff.is_dirty() {
             self.has_queued_save_request = true;
         }
@@ -269,7 +375,7 @@ impl SVGEditor {
                 false
             };
 
-        self.buffer.master_transform_changed = false;
+        self.persist_viewport(ui.ctx());
         ui.ctx().pop_events();
 
         Response { request_save: !self.read_only && needs_save_and_frame_is_cheap }
@@ -366,7 +472,7 @@ impl SVGEditor {
             }
 
             if let input_controller::InputControllerEvent::ViewportChange(transform) = event {
-                transform_canvas(tool_context.buffer, tool_context.viewport_settings, transform);
+                transform_canvas(tool_context.viewport_settings, transform);
             } else if let input_controller::InputControllerEvent::Gesture(num_touches) = event {
                 if num_touches == 2 {
                     tool_context.history.undo(tool_context.buffer)
@@ -429,6 +535,12 @@ impl SVGEditor {
                 format!("{} anchor | {} fps", anchor_count, 1000 / frame_cost.as_millis()),
             );
         }
+    }
+}
+
+impl Drop for SVGEditor {
+    fn drop(&mut self) {
+        self.flush_viewport();
     }
 }
 

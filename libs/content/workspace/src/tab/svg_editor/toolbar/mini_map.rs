@@ -67,7 +67,6 @@ impl Toolbar {
             .invert()
             .unwrap();
 
-        let bounded_rect = transform_rect(bounded_rect, invert_master_transform);
         // make sure the min of bounded_rect starts at (0,0)
         let bounded_rect_offset = egui::vec2(-bounded_rect.left(), -bounded_rect.top());
 
@@ -76,12 +75,13 @@ impl Toolbar {
             transform_rect(tlbr_ctx.viewport_settings.container_rect, invert_master_transform)
                 .translate(bounded_rect_offset);
 
-        let s = mini_map_rect.width() / bounded_rect.width();
+        let s = mini_map_rect.width() / bounded_rect.width().max(1.0);
 
         let mini_map_full_height = bounded_rect.height() * s;
         let mini_map_off_screen_height = (mini_map_full_height - mini_map_rect.height()).max(0.0);
-        let scroll_percentage =
-            container_rect.top() / (bounded_rect.height() - container_rect.height());
+        let scroll_percentage = (container_rect.top()
+            / (bounded_rect.height() - container_rect.height()).max(1.0))
+        .clamp(0.0, 1.0);
         let offset = mini_map_off_screen_height * scroll_percentage;
 
         let viewport_transform = Transform::identity().post_scale(s, s).post_translate(
@@ -145,7 +145,7 @@ impl Toolbar {
                 maybe_delta.map(|delta| Transform::default().post_translate(delta.x, delta.y));
 
             if let Some(transform) = transform {
-                transform_canvas(tlbr_ctx.buffer, tlbr_ctx.viewport_settings, transform);
+                transform_canvas(tlbr_ctx.viewport_settings, transform);
                 has_transformed_canvas = true;
             }
         }
@@ -170,7 +170,6 @@ impl Toolbar {
             .invert()
             .unwrap();
 
-        let bounded_rect = transform_rect(bounded_rect, invert_master_transform);
         // make sure the min of bounded_rect starts at (0,0)
         let bounded_rect_offset = egui::vec2(-bounded_rect.left(), -bounded_rect.top());
         let bounded_rect = bounded_rect.translate(bounded_rect_offset);
@@ -189,7 +188,7 @@ impl Toolbar {
         let mut painter = ui.painter().clone();
         painter.set_clip_rect(scrollarea_rect);
 
-        let scale_down_factor = scrollarea_rect.height() / bounded_rect.height();
+        let scale_down_factor = scrollarea_rect.height() / bounded_rect.height().max(1.0);
         let scrollbar_rect = egui::Rect::from_center_size(
             egui::pos2(
                 scrollarea_rect.center().x,
@@ -227,7 +226,7 @@ impl Toolbar {
         }
         let transform = Transform::default().post_translate(0.0, delta.y);
         if delta.y != 0.0 {
-            transform_canvas(tlbr_ctx.buffer, tlbr_ctx.viewport_settings, transform);
+            transform_canvas(tlbr_ctx.viewport_settings, transform);
         }
     }
 }
