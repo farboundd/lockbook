@@ -452,6 +452,7 @@ impl<'a> GlyphonLabel<'a> {
                         (false, None) => GlyphonFontFamily::SansSerif,
                     },
                     bold: style.bold,
+                    weight: if style.bold { 700 } else { 400 },
                     italic: false,
                     color: style.color.map(|c| c.to_array()),
                 })

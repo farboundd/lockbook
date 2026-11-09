@@ -94,6 +94,7 @@ impl FontFamily {
 pub struct Format {
     pub family: FontFamily,
     pub bold: bool,
+    pub weight: u16,
     pub italic: bool,
     pub color: egui::Color32,
 
@@ -103,6 +104,13 @@ pub struct Format {
     pub spoiler: bool,
     pub superscript: bool,
     pub subscript: bool,
+}
+
+impl Format {
+    pub fn font_weight(&self) -> u16 {
+        let base = if self.family == FontFamily::Sans { self.weight } else { 400 };
+        if self.bold { base.saturating_add(300).min(1000) } else { base }
+    }
 }
 
 // ═════════════════════════════════════════════════════════════════════
@@ -624,6 +632,7 @@ impl MdRender {
         let (Some(fs), Some(cache)) = (fs, cache) else { return (BASELINE, BASELINE) };
         let body = Format {
             family: FontFamily::Sans,
+            weight: self.layout.font_weight,
             bold: false,
             italic: false,
             color: egui::Color32::PLACEHOLDER,
@@ -1186,7 +1195,7 @@ fn shape_chunk(
 fn shape_cache_key(text: &str, format: &Format, metric: f32, width_px: f32) -> GlyphonCacheKey {
     let key_metric =
         if format.superscript || format.subscript { metric * SCRIPT_SCALE } else { metric };
-    GlyphonCacheKey::single(
+    let mut key = GlyphonCacheKey::single(
         text,
         format.family.glyphon_cache_family(),
         format.bold,
@@ -1195,7 +1204,9 @@ fn shape_cache_key(text: &str, format: &Format, metric: f32, width_px: f32) -> G
         key_metric.to_bits(),
         key_metric.to_bits(),
         width_px.to_bits() ^ 1,
-    )
+    );
+    key.spans[0].weight = format.font_weight();
+    key
 }
 
 /// Per-source-grapheme advances read from a pre-shaped chunk
@@ -1255,6 +1266,7 @@ fn format_for_range(
 fn default_format() -> Format {
     Format {
         family: FontFamily::Sans,
+        weight: 400,
         bold: false,
         italic: false,
         color: egui::Color32::WHITE,
@@ -1435,7 +1447,7 @@ fn format_to_attrs(format: &Format, base_row_height: f32) -> glyphon::AttrsOwned
     let mut attrs = glyphon::Attrs::new()
         .color(color)
         .family(family)
-        .weight(if format.bold { glyphon::Weight::BOLD } else { glyphon::Weight::NORMAL })
+        .weight(glyphon::Weight(format.font_weight()))
         .style(if format.italic { glyphon::Style::Italic } else { glyphon::Style::Normal });
     let adjust = format.family.size_adjust();
     if format.superscript || format.subscript {

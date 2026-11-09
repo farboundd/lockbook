@@ -23,6 +23,7 @@
 pub(crate) mod doc_gen;
 pub(crate) mod harness;
 
+mod android_style;
 mod benches;
 mod block_drag;
 mod clipboard;

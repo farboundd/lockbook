@@ -90,6 +90,7 @@ fn bench_shape() {
     let r = test_renderer("");
     let format = Format {
         family: FontFamily::Sans,
+            weight: 400,
         bold: false,
         italic: false,
         color: egui::Color32::WHITE,

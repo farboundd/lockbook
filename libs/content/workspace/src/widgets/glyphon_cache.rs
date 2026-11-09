@@ -14,6 +14,7 @@ pub struct GlyphonCacheSpan {
     pub text: String,
     pub family: GlyphonFontFamily,
     pub bold: bool,
+    pub weight: u16,
     pub italic: bool,
     pub color: Option<[u8; 4]>,
 }
@@ -32,7 +33,14 @@ impl GlyphonCacheKey {
         color: Option<[u8; 4]>, font_size_bits: u32, line_height_bits: u32, width_bits: u32,
     ) -> Self {
         Self {
-            spans: vec![GlyphonCacheSpan { text: text.into(), family, bold, italic, color }],
+            spans: vec![GlyphonCacheSpan {
+                text: text.into(),
+                family,
+                bold,
+                weight: if bold { 700 } else { 400 },
+                italic,
+                color,
+            }],
             font_size_bits,
             line_height_bits,
             width_bits,

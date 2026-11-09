@@ -20,6 +20,7 @@ import app.lockbook.model.FileTreeViewModel
 import app.lockbook.model.MainNavigationAction
 import app.lockbook.model.MainScreenViewModel
 import app.lockbook.model.TransientScreen
+import app.lockbook.model.WorkspaceViewModel
 import com.google.android.material.color.MaterialColors
 import com.google.android.material.snackbar.Snackbar
 import kotlinx.coroutines.Dispatchers
@@ -37,6 +38,7 @@ internal enum class FileSelectionAction(
     val documentOnly: Boolean = false,
     val destructive: Boolean = false,
 ) {
+    EditorSettings(R.string.editor_settings_action, R.drawable.ic_outline_settings_24, singleSelectionOnly = true, documentOnly = true),
     Rename(R.string.menu_list_files_rename, R.drawable.ic_baseline_text_format_24, singleSelectionOnly = true),
     OpenInNewTab(
         R.string.menu_list_files_open_in_new_tab,
@@ -60,7 +62,39 @@ internal enum class FileSelectionAction(
     fun isAvailableFor(files: List<File>): Boolean =
         files.isNotEmpty() &&
             (!singleSelectionOnly || files.size == 1) &&
-            (!documentOnly || files.any { it.type == File.FileType.Document })
+            (!documentOnly || files.any { it.type == File.FileType.Document }) &&
+            (
+                this != EditorSettings || files.singleOrNull()?.let { file ->
+                    file.type == File.FileType.Document && file.name.substringAfterLast('.', "").lowercase() !in nonTextExtensions
+                } == true
+            )
+
+    companion object {
+        private val nonTextExtensions =
+            setOf(
+                "svg",
+                "draw",
+                "pdf",
+                "chat",
+                "cr2",
+                "avif",
+                "bmp",
+                "dds",
+                "exr",
+                "ff",
+                "gif",
+                "hdr",
+                "ico",
+                "jpeg",
+                "jpg",
+                "png",
+                "pnm",
+                "qoi",
+                "tga",
+                "tiff",
+                "webp",
+            )
+    }
 }
 
 internal class FileSelectionBottomBarController(
@@ -68,6 +102,7 @@ internal class FileSelectionBottomBarController(
     private val onAction: (FileSelectionAction, List<File>) -> Unit,
     private val onClearSelection: () -> Unit,
     private val onVisibilityChanged: (Boolean) -> Unit = {},
+    private val isActionVisible: (FileSelectionAction) -> Boolean = { true },
 ) {
     private val count = root.findViewById<android.widget.TextView>(R.id.file_selection_count)
     private val actions = root.findViewById<ViewGroup>(R.id.file_selection_actions)
@@ -86,7 +121,7 @@ internal class FileSelectionBottomBarController(
         if (state.isActive) {
             count.text = title ?: root.context.getString(R.string.files_list_items_selected, state.selectedCount)
             actionButtons.forEach { (action, button) ->
-                button.isVisible = action in state.visibleActions
+                button.isVisible = action in state.visibleActions && isActionVisible(action)
             }
         }
 
@@ -165,6 +200,7 @@ internal class FileSelectionActionDispatcher(
 ) {
     private val alertModel = AlertModel(WeakReference(fragment.requireActivity()), snackbarAnchor)
     private val fileOperations: FileOperationsViewModel by fragment.activityViewModels()
+    private val workspaceModel: WorkspaceViewModel by fragment.activityViewModels()
 
     fun dispatch(
         action: FileSelectionAction,
@@ -172,6 +208,14 @@ internal class FileSelectionActionDispatcher(
     ) {
         if (files.isEmpty()) return
         when (action) {
+            FileSelectionAction.EditorSettings -> {
+                files.singleOrNull()?.let { file ->
+                    workspaceModel.editorSettingsRequested.value = file.id
+                    mainScreenModel.navigate(MainNavigationAction.OpenDocument(file.id, newFile = false))
+                    onClearSelection()
+                }
+            }
+
             FileSelectionAction.Pin -> {
                 pin(files)
             }

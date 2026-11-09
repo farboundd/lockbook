@@ -2171,6 +2171,25 @@ pub struct WsPresistentData {
     /// The widest a note's text column gets, in points.
     #[serde(default = "default_column_width")]
     column_width: f32,
+    /// Android's native settings, in editor points: font size and side margin.
+    #[serde(default = "default_android_editor_style")]
+    android_editor_style: [f32; 2],
+    #[serde(default = "default_android_line_spacing")]
+    android_line_spacing: f32,
+    #[serde(default = "default_android_font_weight")]
+    android_font_weight: u16,
+}
+
+fn default_android_font_weight() -> u16 {
+    400
+}
+
+fn default_android_line_spacing() -> f32 {
+    6.0
+}
+
+fn default_android_editor_style() -> [f32; 2] {
+    [16.0, 32.0]
 }
 
 fn default_column_width() -> f32 {
@@ -2208,6 +2227,9 @@ impl Default for WsPresistentData {
             update_links: true,
             spell_check: true,
             column_width: default_column_width(),
+            android_editor_style: default_android_editor_style(),
+            android_line_spacing: default_android_line_spacing(),
+            android_font_weight: default_android_font_weight(),
         }
     }
 }
@@ -2404,6 +2426,55 @@ impl WsPersistentStore {
         }
         data_lock.spell_check = spell_check;
         drop(data_lock);
+        self.write_to_file();
+    }
+
+    pub fn get_android_font_weight(&self) -> u16 {
+        self.data.read().unwrap().android_font_weight
+    }
+
+    pub fn set_android_font_weight(&mut self, weight: u16) {
+        let weight = weight.clamp(1, 1000);
+        let mut data = self.data.write().unwrap();
+        if data.android_font_weight == weight { return; }
+        data.android_font_weight = weight;
+        drop(data);
+        self.write_to_file();
+    }
+
+    pub fn get_android_line_spacing(&self) -> f32 {
+        self.data.read().unwrap().android_line_spacing
+    }
+
+    pub fn set_android_line_spacing(&mut self, spacing: f32) {
+        if !spacing.is_finite() {
+            return;
+        }
+        let spacing = spacing.clamp(0.0, 24.0);
+        let mut data = self.data.write().unwrap();
+        if data.android_line_spacing == spacing {
+            return;
+        }
+        data.android_line_spacing = spacing;
+        drop(data);
+        self.write_to_file();
+    }
+
+    pub fn get_android_editor_style(&self) -> [f32; 2] {
+        self.data.read().unwrap().android_editor_style
+    }
+
+    pub fn set_android_editor_style(&mut self, font_size: f32, margin: f32) {
+        if !font_size.is_finite() || !margin.is_finite() {
+            return;
+        }
+        let style = [font_size.clamp(12.0, 32.0), margin.clamp(15.0, 80.0)];
+        let mut data = self.data.write().unwrap();
+        if data.android_editor_style == style {
+            return;
+        }
+        data.android_editor_style = style;
+        drop(data);
         self.write_to_file();
     }
 

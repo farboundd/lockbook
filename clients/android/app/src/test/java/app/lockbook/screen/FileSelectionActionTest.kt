@@ -61,6 +61,16 @@ class FileSelectionActionTest {
         assertEquals(false, FileSelectionAction.Duplicate in available)
     }
 
+    @Test
+    fun `editor settings are limited to one text document`() {
+        val text = file(File.FileType.Document).apply { name = "note.md" }
+        val pdf = file(File.FileType.Document).apply { name = "document.PDF" }
+        assertEquals(true, FileSelectionAction.EditorSettings.isAvailableFor(listOf(text)))
+        assertEquals(false, FileSelectionAction.EditorSettings.isAvailableFor(listOf(pdf)))
+        assertEquals(false, FileSelectionAction.EditorSettings.isAvailableFor(listOf(text, text)))
+        assertEquals(false, FileSelectionAction.EditorSettings.isAvailableFor(listOf(file(File.FileType.Folder))))
+    }
+
     private fun file(type: File.FileType): File =
         File().apply {
             id = type.name

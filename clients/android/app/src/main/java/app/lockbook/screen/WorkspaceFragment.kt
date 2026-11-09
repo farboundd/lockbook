@@ -56,6 +56,7 @@ import app.lockbook.model.SearchPresentation
 import app.lockbook.model.WorkspaceTab
 import app.lockbook.model.WorkspaceTabType
 import app.lockbook.model.WorkspaceViewModel
+import app.lockbook.ui.EditorSettingsBottomSheet
 import app.lockbook.util.AttachmentStager
 import app.lockbook.util.MAX_ATTACHMENT_SIZE_BYTES
 import app.lockbook.util.MarkdownToolbarView
@@ -91,6 +92,7 @@ class WorkspaceFragment : Fragment() {
     private var systemControlInsets = Insets.NONE
     private var toolbarHiddenByScroll = false
     private var tabsDialog: BottomSheetDialog? = null
+    private var editorSettingsDialog: EditorSettingsBottomSheet? = null
     private var tabsContent: WorkspaceTabsDialogBinding? = null
     private var documentActionsController: FileSelectionBottomBarController? = null
     private var documentActionsBackCallback: OnBackPressedCallback? = null
@@ -216,11 +218,15 @@ class WorkspaceFragment : Fragment() {
         }
 
         model.currentTab.observe(viewLifecycleOwner) { tab ->
+            if (tab.type != WorkspaceTabType.Markdown) editorSettingsDialog?.dismiss()
             if (documentActionFile?.id != tab.id) hideDocumentActions()
             updateCurrentTab(workspaceWrapper, tab)
             workspaceWrapper.updateNativeToolbar()
             welcomeScreen.finishCaptureHandoff(workspaceWrapper, tab)
+            showRequestedEditorSettings()
         }
+
+        model.editorSettingsRequested.observe(viewLifecycleOwner) { showRequestedEditorSettings() }
 
         model.bottomInset.observe(viewLifecycleOwner) {
             workspaceWrapper.workspaceView.setBottomInset(it)
@@ -364,6 +370,25 @@ class WorkspaceFragment : Fragment() {
         workspaceWrapper.onVerticalScroll = ::onWorkspaceScroll
     }
 
+    private fun showRequestedEditorSettings() {
+        val id = model.editorSettingsRequested.value ?: return
+        val tab = model.currentTab.value ?: return
+        if (tab.id != id || tab.type == WorkspaceTabType.Loading) return
+        model.editorSettingsRequested.value = null
+        if (tab.type == WorkspaceTabType.Markdown) showEditorSettings()
+    }
+
+    private fun showEditorSettings() {
+        if (model.currentTab.value?.type != WorkspaceTabType.Markdown || editorSettingsDialog != null) return
+        hideEditorKeyboard()
+        hideDocumentActions()
+        tabsDialog?.dismiss()
+        val dialog = EditorSettingsBottomSheet(requireContext()) { workspaceView?.invalidate() }
+        editorSettingsDialog = dialog
+        dialog.setOnDismissListener { editorSettingsDialog = null }
+        dialog.show()
+    }
+
     private fun isWelcomeVisible(): Boolean = welcomeScreen.isVisible
 
     private fun canToolbarHideOnScroll(): Boolean = isWelcomeVisible() || model.currentTab.value?.type == WorkspaceTabType.Markdown
@@ -414,9 +439,13 @@ class WorkspaceFragment : Fragment() {
                 root = binding.workspaceDocumentActions.root,
                 onAction = { action, files ->
                     hideDocumentActions()
-                    dispatcher.dispatch(action, files)
+                    if (action == FileSelectionAction.EditorSettings) showEditorSettings() else dispatcher.dispatch(action, files)
                 },
                 onClearSelection = ::hideDocumentActions,
+                isActionVisible = { action ->
+                    action != FileSelectionAction.EditorSettings ||
+                        model.currentTab.value?.type == WorkspaceTabType.Markdown
+                },
                 onVisibilityChanged = { visible ->
                     backCallback.isEnabled = visible
                     binding.workspaceToolbar.importantForAccessibility =
@@ -525,6 +554,8 @@ class WorkspaceFragment : Fragment() {
     override fun onDestroyView() {
         finishPendingTabClose()
         welcomeScreen.unbind()
+        editorSettingsDialog?.dismiss()
+        editorSettingsDialog = null
         tabsDialog?.dismiss()
         tabsDialog = null
         tabsContent = null

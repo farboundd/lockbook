@@ -587,6 +587,56 @@ pub extern "system" fn Java_app_lockbook_workspace_Workspace_selectionMisspellin
     .into_raw()
 }
 
+/// Returns null while the existing background font scan is still running.
+#[no_mangle]
+pub extern "system" fn Java_app_lockbook_workspace_Workspace_availableEditorFonts(
+    env: JNIEnv, _: JClass,
+) -> jstring {
+    let Some(families) = workspace_rs::font::system::families() else {
+        return std::ptr::null_mut();
+    };
+    let preview = |name: &str, family: Option<&str>| {
+        use glyphon::fontdb::{Source, Style};
+        let weights = family.map(workspace_rs::font::system::weights).unwrap_or_default();
+        let faces: Vec<_> = weights.into_iter().filter_map(|weight| {
+            let face = workspace_rs::font::system::nearest(family?, weight, Style::Normal)?;
+            let path = match &face.source {
+                Source::File(path) | Source::SharedFile(path, _) => Some(path.to_string_lossy().into_owned()),
+                Source::Binary(_) => None,
+            };
+            Some(serde_json::json!({
+                "path": path, "index": face.index, "weight": weight,
+                "italic": face.style == Style::Italic,
+            }))
+        }).collect();
+        serde_json::json!({ "family": name, "faces": faces })
+    };
+    let previews: Vec<_> = std::iter::once(preview("", workspace_rs::font::system::platform_sans()))
+        .chain(families.iter().map(|(name, _)| preview(name, Some(name))))
+        .collect();
+    env.new_string(serde_json::to_string(&previews).unwrap()).unwrap().into_raw()
+}
+
+#[no_mangle]
+pub extern "system" fn Java_app_lockbook_workspace_Workspace_setEditorTypography(
+    mut env: JNIEnv, _: JClass, obj: jlong, family: JString, spacing: jfloat, weight: jint,
+) {
+    let Ok(family) = env.get_string(&family) else { return };
+    let family = String::from(family);
+    let obj = unsafe { &mut *(obj as *mut WgpuWorkspace) };
+    workspace_rs::font::choose((!family.is_empty()).then_some(family.as_str()), None);
+    obj.workspace.cfg.set_android_line_spacing(spacing);
+    obj.workspace.cfg.set_android_font_weight(weight.clamp(1, 1000) as u16);
+}
+
+#[no_mangle]
+pub extern "system" fn Java_app_lockbook_workspace_Workspace_setEditorStyle(
+    _env: JNIEnv, _: JClass, obj: jlong, font_size: jfloat, margin: jfloat,
+) {
+    let obj = unsafe { &mut *(obj as *mut WgpuWorkspace) };
+    obj.workspace.cfg.set_android_editor_style(font_size, margin);
+}
+
 #[no_mangle]
 pub extern "system" fn Java_app_lockbook_workspace_Workspace_setSpellCheck(
     _env: JNIEnv, _: JClass, obj: jlong, value: jboolean,

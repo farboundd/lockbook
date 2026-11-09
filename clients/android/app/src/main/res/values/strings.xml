@@ -367,4 +367,31 @@
     <string name="metadata_loading">Loading your files…</string>
     <string name="metadata_retry">Try again</string>
     <string name="create_file_choose_another_location">%1$s Choose another location.</string>
+    <string name="editor_settings">Editor settings</string>
+    <string name="editor_settings_action">Editor</string>
+    <string name="editor_font_size_key" translatable="false">editor_font_size</string>
+    <string name="editor_margin_key" translatable="false">editor_margin</string>
+    <string name="settings_editor_font_size">Font size</string>
+    <string name="settings_editor_margin">Side margins</string>
+    <plurals name="editor_points">
+        <item quantity="one">%d point</item>
+        <item quantity="other">%d points</item>
+    </plurals>
+    <string name="editor_font_family_key" translatable="false">editor_font_family</string>
+    <string name="editor_line_spacing_key" translatable="false">editor_line_spacing</string>
+    <string name="editor_font">Font</string>
+    <string name="editor_default_font">Default</string>
+    <string name="editor_line_spacing">Line spacing</string>
+    <string name="editor_font_weight_key" translatable="false">editor_font_weight</string>
+    <string name="editor_font_weight">Font weight</string>
+    <string name="editor_weight_thin">Thin</string>
+    <string name="editor_weight_extra_light">Extra light</string>
+    <string name="editor_weight_light">Light</string>
+    <string name="editor_weight_regular">Regular</string>
+    <string name="editor_weight_medium">Medium</string>
+    <string name="editor_weight_semi_bold">Semi bold</string>
+    <string name="editor_weight_bold">Bold</string>
+    <string name="editor_weight_extra_bold">Extra bold</string>
+    <string name="editor_weight_black">Black</string>
+    <string name="editor_weight_value">%1$s · %2$d</string>
 </resources>

@@ -280,6 +280,7 @@ impl<'ast> MdRender {
     pub fn text_format_syntax(&self) -> Format {
         Format {
             family: FontFamily::Mono,
+            weight: 400,
             bold: false,
             italic: false,
             color: self.ctx.get_lb_theme().neutral_fg_secondary(),

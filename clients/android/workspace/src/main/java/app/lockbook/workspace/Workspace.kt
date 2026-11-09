@@ -219,6 +219,12 @@ object Workspace {
     external fun refreshSelectionPreviews(rustObj: Long)
     external fun setContactLinkedSites(rustObj: Long, value: Boolean)
 
+    external fun availableEditorFonts(): String?
+
+    external fun setEditorTypography(rustObj: Long, family: String, lineSpacing: Float, weight: Int)
+
+    external fun setEditorStyle(rustObj: Long, fontSize: Float, margin: Float)
+
     external fun setSpellCheck(rustObj: Long, value: Boolean)
 
     external fun spellingRequests(rustObj: Long): String?

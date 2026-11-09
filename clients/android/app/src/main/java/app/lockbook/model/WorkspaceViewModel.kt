@@ -45,6 +45,8 @@ class WorkspaceViewModel(
     val currentTab: LiveData<WorkspaceTab>
         get() = _currentTab
 
+    val editorSettingsRequested = MutableLiveData<String?>()
+
     var isFileTreeSyncedToCurrentTab = true
 
     val _finishedAction = SingleMutableLiveData<FinishedAction>()

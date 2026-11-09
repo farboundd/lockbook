@@ -1,0 +1,156 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.core.widget.NestedScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:fillViewport="true">
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:paddingHorizontal="24dp"
+    android:paddingTop="8dp"
+    android:paddingBottom="24dp">
+
+    <com.google.android.material.bottomsheet.BottomSheetDragHandleView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content" />
+
+    <com.google.android.material.textview.MaterialTextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:paddingBottom="32dp"
+        android:text="@string/editor_settings"
+        android:textAppearance="?attr/textAppearanceTitleLarge" />
+
+    <com.google.android.material.textfield.TextInputLayout
+        style="@style/Widget.Material3.TextInputLayout.OutlinedBox.ExposedDropdownMenu"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="24dp"
+        android:hint="@string/editor_font">
+        <androidx.appcompat.widget.AppCompatAutoCompleteTextView
+            android:id="@+id/font_family"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:inputType="none"
+            android:dropDownHeight="192dp"
+            android:maxLines="1" />
+    </com.google.android.material.textfield.TextInputLayout>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+        <com.google.android.material.textview.MaterialTextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:labelFor="@id/font_weight"
+            android:text="@string/editor_font_weight"
+            android:textAppearance="?attr/textAppearanceBodyLarge" />
+        <com.google.android.material.textview.MaterialTextView
+            android:id="@+id/font_weight_value"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textAppearance="?attr/textAppearanceBodyLarge" />
+    </LinearLayout>
+    <com.google.android.material.slider.Slider
+        android:id="@+id/font_weight"
+        android:layout_width="match_parent"
+        android:layout_height="48dp"
+        android:contentDescription="@string/editor_font_weight"
+        android:valueFrom="0"
+        android:valueTo="1"
+        android:stepSize="1"
+        android:value="0"
+        app:tickVisible="true" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+        <com.google.android.material.textview.MaterialTextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:labelFor="@id/font_size"
+            android:text="@string/settings_editor_font_size"
+            android:textAppearance="?attr/textAppearanceBodyLarge" />
+        <com.google.android.material.textview.MaterialTextView
+            android:id="@+id/font_size_value"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textAppearance="?attr/textAppearanceBodyLarge" />
+    </LinearLayout>
+    <com.google.android.material.slider.Slider
+        android:id="@+id/font_size"
+        android:layout_width="match_parent"
+        android:layout_height="48dp"
+        android:contentDescription="@string/settings_editor_font_size"
+        android:valueFrom="12"
+        android:valueTo="32"
+        android:stepSize="1"
+        android:value="16"
+        app:tickVisible="false" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+        <com.google.android.material.textview.MaterialTextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:labelFor="@id/margin"
+            android:text="@string/settings_editor_margin"
+            android:textAppearance="?attr/textAppearanceBodyLarge" />
+        <com.google.android.material.textview.MaterialTextView
+            android:id="@+id/margin_value"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textAppearance="?attr/textAppearanceBodyLarge" />
+    </LinearLayout>
+    <com.google.android.material.slider.Slider
+        android:id="@+id/margin"
+        android:layout_width="match_parent"
+        android:layout_height="48dp"
+        android:contentDescription="@string/settings_editor_margin"
+        android:valueFrom="15"
+        android:valueTo="80"
+        android:stepSize="1"
+        android:value="32"
+        app:tickVisible="false" />
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+        <com.google.android.material.textview.MaterialTextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:labelFor="@id/line_spacing"
+            android:text="@string/editor_line_spacing"
+            android:textAppearance="?attr/textAppearanceBodyLarge" />
+        <com.google.android.material.textview.MaterialTextView
+            android:id="@+id/line_spacing_value"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textAppearance="?attr/textAppearanceBodyLarge" />
+    </LinearLayout>
+    <com.google.android.material.slider.Slider
+        android:id="@+id/line_spacing"
+        android:layout_width="match_parent"
+        android:layout_height="48dp"
+        android:contentDescription="@string/editor_line_spacing"
+        android:valueFrom="0"
+        android:valueTo="24"
+        android:stepSize="1"
+        android:value="6"
+        app:tickVisible="false" />
+</LinearLayout>
+</androidx.core.widget.NestedScrollView>

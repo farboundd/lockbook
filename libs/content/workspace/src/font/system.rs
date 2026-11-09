@@ -443,6 +443,35 @@ pub fn nearest(family: &str, weight: u16, style: Style) -> Option<&'static FaceI
         .min_by_key(|f| (f.style != style, f.style != Style::Normal, f.weight.0.abs_diff(weight)))
 }
 
+/// Weights the regular faces of a family can draw, including variable axes.
+pub fn weights(family: &str) -> Vec<u16> {
+    let faces: Vec<_> = text_faces(family).collect();
+    let normal = faces.iter().any(|face| face.style == Style::Normal);
+    let mut weights = std::collections::BTreeSet::new();
+    for face in faces
+        .iter()
+        .filter(|face| !normal || face.style == Style::Normal)
+    {
+        weights.insert(face.weight.0);
+        if let Some(data) = face_data(face) {
+            if let Ok(parsed) = ttf_parser::Face::parse((*data).as_ref(), face.index) {
+                for axis in parsed
+                    .variation_axes()
+                    .into_iter()
+                    .filter(|axis| axis.tag == ttf_parser::Tag::from_bytes(b"wght"))
+                {
+                    for weight in (100..=900).step_by(100) {
+                        if (axis.min_value..=axis.max_value).contains(&(weight as f32)) {
+                            weights.insert(weight);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    weights.into_iter().collect()
+}
+
 /// `face` with its file mapped once and shared: the fallback reads every face
 /// in a font system with each new style, and would otherwise reopen each file.
 pub fn shared(face: &FaceInfo) -> FaceInfo {

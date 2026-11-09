@@ -102,6 +102,11 @@ class WorkspaceView(
 
     private val prefs by lazy { PreferenceManager.getDefaultSharedPreferences(context) }
     private val contactLinkedSitesKey by lazy { context.getString(R.string.contact_linked_sites_key) }
+    private val editorFontWeightKey by lazy { context.getString(R.string.editor_font_weight_key) }
+    private val editorFontFamilyKey by lazy { context.getString(R.string.editor_font_family_key) }
+    private val editorLineSpacingKey by lazy { context.getString(R.string.editor_line_spacing_key) }
+    private val editorFontSizeKey by lazy { context.getString(R.string.editor_font_size_key) }
+    private val editorMarginKey by lazy { context.getString(R.string.editor_margin_key) }
     private val spellCheckKey by lazy { context.getString(R.string.spell_check_key) }
     private val spelling by lazy { WorkspaceSpelling(context) { invalidate() } }
 
@@ -317,6 +322,12 @@ class WorkspaceView(
         publishOpenTabCount()
     }
 
+    override fun onWindowFocusChanged(hasWindowFocus: Boolean) {
+        super.onWindowFocusChanged(hasWindowFocus)
+        // Returning from settings must draw the new preferences, even when idle.
+        if (hasWindowFocus) invalidate()
+    }
+
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
 
@@ -413,6 +424,13 @@ class WorkspaceView(
 
         Workspace.setContactLinkedSites(wgpuObj, prefs.getBoolean(contactLinkedSitesKey, false))
         Workspace.setSpellCheck(wgpuObj, prefs.getBoolean(spellCheckKey, true))
+        Workspace.setEditorStyle(wgpuObj, prefs.getInt(editorFontSizeKey, 16).toFloat(), prefs.getInt(editorMarginKey, 32).toFloat())
+        Workspace.setEditorTypography(
+            wgpuObj,
+            prefs.getString(editorFontFamilyKey, "").orEmpty(),
+            prefs.getInt(editorLineSpacingKey, 6).toFloat(),
+            prefs.getInt(editorFontWeightKey, 400),
+        )
 
         model.nextAttachment()?.let { attachment ->
             when (Workspace.currentTab(wgpuObj).toModelTab().type) {

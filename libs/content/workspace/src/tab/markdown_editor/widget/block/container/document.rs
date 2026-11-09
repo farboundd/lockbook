@@ -13,6 +13,7 @@ impl<'ast> MdRender {
     pub fn text_format_document(&self) -> Format {
         Format {
             family: FontFamily::Sans,
+            weight: self.layout.font_weight,
             bold: false,
             italic: false,
             color: self.ctx.get_lb_theme().neutral_fg(),

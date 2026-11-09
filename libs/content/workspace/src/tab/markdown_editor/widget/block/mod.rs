@@ -870,7 +870,7 @@ impl MdRender {
             glyphon::Wrap::Glyph => width.to_bits() ^ 2,
             _ => width.to_bits() ^ 3,
         };
-        let key = GlyphonCacheKey::single(
+        let mut key = GlyphonCacheKey::single(
             text,
             format.family.glyphon_cache_family(),
             format.bold,
@@ -881,12 +881,13 @@ impl MdRender {
             width_bits,
         );
 
+        key.spans[0].weight = format.font_weight();
         let fs = Arc::clone(&font_system);
         let mut cache = glyphon_cache.lock().unwrap();
         cache.get_or_shape(key, move || {
             let attrs = glyphon::Attrs::new()
                 .family(format.family.glyphon_family())
-                .weight(if format.bold { glyphon::Weight::BOLD } else { glyphon::Weight::NORMAL })
+                .weight(glyphon::Weight(format.font_weight()))
                 .style(if format.italic { glyphon::Style::Italic } else { glyphon::Style::Normal });
             let metrics =
                 glyphon::Metrics::new(font_size * format.family.size_adjust(), line_height);

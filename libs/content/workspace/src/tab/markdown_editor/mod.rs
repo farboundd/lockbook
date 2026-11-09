@@ -645,10 +645,12 @@ pub struct MdConfig {
 
 pub struct MdLayout {
     pub margin: f32,
+    pub right_margin: f32,
     pub max_width: f32,
     pub inline_padding: f32,
     pub annotation_font_size: f32,
     pub row_height: f32,
+    pub font_weight: u16,
     pub block_padding: f32,
     pub indent: f32,
     pub bullet_radius: f32,
@@ -664,10 +666,12 @@ impl MdLayout {
     pub fn mobile() -> Self {
         Self {
             margin: 32.0,
+            right_margin: 32.0,
             max_width: 1000.0,
             inline_padding: 3.0,
             annotation_font_size: 12.0,
             row_height: 16.0,
+            font_weight: 400,
             block_padding: 10.0,
             indent: 26.0,
             bullet_radius: 2.0,
@@ -683,10 +687,12 @@ impl MdLayout {
     pub fn desktop() -> Self {
         Self {
             margin: 45.0,
+            right_margin: 45.0,
             max_width: 1000.0,
             inline_padding: 3.0,
             annotation_font_size: 12.0,
             row_height: 16.0,
+            font_weight: 400,
             block_padding: 10.0,
             indent: 26.0,
             bullet_radius: 2.0,
@@ -1463,6 +1469,32 @@ impl Editor {
             resp.scroll_updated = true;
         }
 
+        let mut editor_style_updated = false;
+        if ui.ctx().os() == OperatingSystem::Android && !self.embedded {
+            let [font_size, margin] = self.persistence.get_android_editor_style();
+            let line_spacing = self.persistence.get_android_line_spacing();
+            let font_weight = self.persistence.get_android_font_weight();
+            let layout = &mut self.edit.renderer.layout;
+            // Fold controls extend one indent to the left of headings and lists.
+            // Keep that gutter even if preferences from an older build are smaller.
+            let left_margin = margin.max(layout.indent + 6.0);
+            editor_style_updated = layout.row_height != font_size
+                || layout.margin != left_margin
+                || layout.right_margin != margin
+                || layout.row_spacing != line_spacing
+                || layout.font_weight != font_weight;
+            layout.row_height = font_size;
+            layout.margin = left_margin;
+            layout.right_margin = margin;
+            layout.row_spacing = line_spacing;
+            layout.font_weight = font_weight;
+            if editor_style_updated {
+                self.edit.renderer.layout_cache.body_metrics.set(None);
+                self.edit.renderer.layout_cache.clear();
+                self.edit.renderer.layout_cache.table_cells.borrow_mut().clear();
+            }
+        }
+
         // Desktop follows the text width setting; touch keeps its own cap.
         if !self.edit.renderer.touch_mode {
             self.edit.renderer.layout.max_width = self.persistence.get_column_width();
@@ -1505,7 +1537,7 @@ impl Editor {
         if height_updated {
             self.edit.renderer.layout_cache.clear();
         }
-        let fonts_updated = self.edit.renderer.follow_fonts();
+        let fonts_updated = self.edit.renderer.follow_fonts() || editor_style_updated;
 
         // both stamp the workspace counter, so the larger moves when either does
         let embeds_seq = (
@@ -1554,7 +1586,8 @@ impl Editor {
         // layout, moving the selection's rects without moving the selection.
         // Report as a scroll: iOS re-fetches geometry on either signal, but a
         // selection report also resets the keyboard's QuickType context.
-        resp.scroll_updated |= embeds_updated
+        resp.scroll_updated |= editor_style_updated
+            || embeds_updated
             || link_meta_updated
             || prior_entered_atom != self.edit.renderer.entered_atom;
 
@@ -2049,6 +2082,8 @@ impl Editor {
                 let layout_margin =
                     if self.embedded { 0.0 } else { self.edit.renderer.layout.margin };
 
+                let right_margin =
+                    if self.embedded { 0.0 } else { self.edit.renderer.layout.right_margin };
                 let arena = Arena::new();
                 let root = self.edit.renderer.reparse(&arena);
 
@@ -2071,8 +2106,10 @@ impl Editor {
                 // crossing from docked to floating moves nothing.
                 let edge = crate::style::Space::Md.pts();
                 let side = SIDECAR_GAP + SIDECAR_W + edge;
-                let col_width = (canvas_width - 2.0 * layout_margin).min(max_width).max(0.0);
-                let centered = ((canvas_width - col_width) / 2.0).max(0.0);
+                let col_width = (canvas_width - layout_margin - right_margin)
+                    .min(max_width).max(0.0);
+                let centered = layout_margin
+                    + ((canvas_width - col_width - layout_margin - right_margin) / 2.0).max(0.0);
                 let beside = canvas_width - side - col_width;
                 let docks = beside >= layout_margin;
                 let open_left = beside.max(layout_margin).min(centered);
@@ -2844,7 +2881,8 @@ impl Editor {
     /// heading's section, or the whole note.
     pub fn region_height(&mut self, fragment: Option<&crate::tab::Fragment>, width: f32) -> f32 {
         let margin = if self.embedded { 0.0 } else { self.edit.renderer.layout.margin };
-        let col = (width - 2.0 * margin)
+        let right_margin = if self.embedded { 0.0 } else { self.edit.renderer.layout.right_margin };
+        let col = (width - margin - right_margin)
             .min(self.edit.renderer.layout.max_width)
             .max(0.0);
         self.edit.renderer.set_width(col);
