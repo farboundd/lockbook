@@ -372,8 +372,13 @@ fn transfer(
     Ok(())
 }
 
+pub enum RefreshProgress {
+    Message(String),
+    Segments { complete: usize, total: usize },
+}
+
 pub fn refresh(
-    directory: &Path, remote: &str, progress: impl Fn(String),
+    directory: &Path, remote: &str, progress: impl Fn(RefreshProgress),
 ) -> Result<(History, u64)> {
     super::private_directory(directory)?;
     let lock = OpenOptions::new()
@@ -383,7 +388,7 @@ pub fn refresh(
         .truncate(false)
         .open(directory.join("refresh.lock"))?;
     lock.try_lock()?;
-    progress("Checking production logs…".into());
+    progress(RefreshProgress::Message("Checking production logs…".into()));
     let inventory = describe(remote)?;
     let mut bytes = 0;
     let history = refresh_cache(
@@ -391,7 +396,9 @@ pub fn refresh(
         remote,
         inventory,
         |segment, file, from, to| {
-            transfer(remote, segment, file, from, to, &progress)?;
+            transfer(remote, segment, file, from, to, &|text| {
+                progress(RefreshProgress::Message(text));
+            })?;
             bytes += to - from;
             Ok(())
         },
@@ -402,7 +409,8 @@ pub fn refresh(
 
 fn refresh_cache(
     directory: &Path, remote: &str, inventory: Inventory,
-    mut fetch: impl FnMut(&Segment, &mut File, u64, u64) -> Result<()>, progress: impl Fn(String),
+    mut fetch: impl FnMut(&Segment, &mut File, u64, u64) -> Result<()>,
+    progress: impl Fn(RefreshProgress),
 ) -> Result<History> {
     let manifest_path = directory.join("manifest.json");
     let mut manifest = read_manifest(&manifest_path, remote)?;
@@ -434,6 +442,9 @@ fn refresh_cache(
     }
     let range_directory = directory.join(&manifest.generation);
 
+    let total = inventory.segments.len();
+    let mut complete = 0;
+    progress(RefreshProgress::Segments { complete, total });
     let mut segments: BTreeMap<_, _> = manifest
         .segments
         .values()
@@ -506,6 +517,10 @@ fn refresh_cache(
         manifest
             .segments
             .insert(segment.number, CachedSegment { source: segment.clone(), skip, tail });
+        if *on_server {
+            complete += 1;
+            progress(RefreshProgress::Segments { complete, total });
+        }
     }
     save_manifest(directory, &manifest_path, &manifest)?;
     let signature = Sha256::digest(serde_json::to_vec(&manifest)?).into();
@@ -514,10 +529,11 @@ fn refresh_cache(
             if !history.partial_tail {
                 history.anchor(inventory.observed, history.latest);
             }
+            progress(RefreshProgress::Message("Saving the local cache…".into()));
             return super::write_cache(directory, history);
         }
     }
-    progress("Replaying transactions…".into());
+    progress(RefreshProgress::Message("Replaying transactions…".into()));
     let mut history = replay(
         manifest
             .segments
@@ -588,10 +604,13 @@ mod tests {
     fn import(
         original: &Path, cache: &Path, received: &mut Vec<(u64, u64, u64)>, interrupt: Option<u64>,
     ) -> Result<History> {
-        refresh_cache(
+        let inventory = inventory(original);
+        let total = inventory.segments.len();
+        let reported = std::cell::Cell::new(0);
+        let history = refresh_cache(
             cache,
             "/fixture/ServerV6",
-            inventory(original),
+            inventory,
             |segment, destination, start, end| {
                 received.push((segment.number, start, end));
                 let mut reader = File::open(original.join(format!("db.{}.log", segment.number)))?;
@@ -603,8 +622,16 @@ mod tests {
                 }
                 Ok(())
             },
-            |_| {},
-        )
+            |event| {
+                if let RefreshProgress::Segments { complete, total: progress_total } = event {
+                    assert_eq!(progress_total, total);
+                    assert_eq!(complete, reported.get());
+                    reported.set(complete + 1);
+                }
+            },
+        )?;
+        assert_eq!(reported.get(), total + 1);
+        Ok(history)
     }
 
     #[test]

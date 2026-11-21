@@ -1,12 +1,13 @@
 use super::history::{DAY, History};
 use super::queries::{self, Cohort, Retention, SeriesPoint};
+use super::source::RefreshProgress;
 use super::{Result, cache_sync_time, format_bytes, read_cache, source};
 use eframe::egui::{
     self, Align2, Color32, Context, FontId, Frame, Pos2, Rect, RichText, Stroke, Ui, Vec2,
 };
 use std::path::PathBuf;
 use std::sync::{Arc, mpsc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use time::OffsetDateTime;
 use time::macros::format_description;
 use workspace_rs::theme::icons::Icon;
@@ -17,6 +18,8 @@ const DATE: &[time::format_description::BorrowedFormatItem<'static>] =
 const TIME: &[time::format_description::BorrowedFormatItem<'static>] =
     format_description!("[year]-[month]-[day] [hour]:[minute] UTC");
 const STALE_AFTER_MS: i64 = 60 * 60 * 1000;
+const LOGO_TURN_SECONDS: f32 = 1.2;
+const LOGO_PAUSE_SECONDS: f32 = 4.8;
 const COLORS: [Color32; 4] = [
     Color32::from_rgb(90, 125, 241),
     Color32::from_rgb(33, 155, 128),
@@ -39,7 +42,7 @@ enum Job {
 }
 
 enum Update {
-    Progress(String),
+    Progress(RefreshProgress),
     Loaded(Result<Option<History>>, Job, Transfer),
     Analysis((i64, i64), Arc<History>, Analysis),
 }
@@ -88,6 +91,8 @@ pub struct Metrics {
     source_error: Option<String>,
     job: Job,
     progress: Option<String>,
+    segments: Option<(usize, usize)>,
+    loading_started: Instant,
     query: Option<Analysis>,
     sort: Sort,
     search: String,
@@ -122,6 +127,8 @@ impl Metrics {
             source_error: None,
             job: Job::Cached,
             progress: None,
+            segments: None,
+            loading_started: Instant::now(),
             query: None,
             sort: Sort::Storage,
             search: String::new(),
@@ -146,6 +153,8 @@ impl Metrics {
         }
         self.busy = true;
         self.job = job;
+        self.segments = None;
+        self.loading_started = Instant::now();
         self.progress = Some(
             match job {
                 Job::Open => "Opening local logs…",
@@ -185,7 +194,12 @@ impl Metrics {
     fn updates(&mut self, ctx: &Context) {
         while let Ok(update) = self.updates.try_recv() {
             match update {
-                Update::Progress(progress) => self.progress = Some(progress),
+                Update::Progress(RefreshProgress::Message(progress)) => {
+                    self.progress = Some(progress);
+                }
+                Update::Progress(RefreshProgress::Segments { complete, total }) => {
+                    self.segments = Some((complete, total));
+                }
                 Update::Analysis(range, history, analysis) => {
                     if self.range == Some(range)
                         && self
@@ -199,6 +213,7 @@ impl Metrics {
                 Update::Loaded(result, job, transfer) => {
                     self.busy = false;
                     self.progress = None;
+                    self.segments = None;
                     match result {
                         Ok(Some(history)) => {
                             let coverage = history
@@ -378,6 +393,7 @@ impl Metrics {
             self.load(Job::Refresh, ctx);
         }
         if let Some(progress) = &self.progress {
+            self.segment_progress(ui, 260.0);
             ui.label(progress);
         }
         if let Some(error) = &self.source_error {
@@ -411,14 +427,32 @@ impl Metrics {
         });
     }
 
+    fn segment_progress(&self, ui: &mut Ui, width: f32) -> bool {
+        let Some((complete, total)) = self.segments.filter(|&(_, total)| total != 0) else {
+            return false;
+        };
+        let bar = egui::ProgressBar::new(complete as f32 / total as f32)
+            .desired_width(width)
+            .text(format!("{complete} of {total} segments · {} left", total - complete));
+        ui.add(bar);
+        true
+    }
+
     fn onboarding(&mut self, ui: &mut Ui) {
         ui.painter()
             .rect_filled(ui.max_rect(), 0.0, ui.visuals().panel_fill);
         let ctx = ui.ctx().clone();
-        let animate = self.busy && ui.style().animation_time > 0.0;
-        let time = if animate {
-            ctx.request_repaint_after(Duration::from_millis(16));
-            ctx.input(|input| input.time) as f32
+        let angle = if self.busy && ui.style().animation_time > 0.0 {
+            let elapsed = self.loading_started.elapsed().as_secs_f32();
+            let phase = (elapsed + LOGO_PAUSE_SECONDS - LOGO_TURN_SECONDS)
+                % (LOGO_PAUSE_SECONDS + LOGO_TURN_SECONDS);
+            let turn = ((phase - LOGO_PAUSE_SECONDS) / LOGO_TURN_SECONDS).clamp(0.0, 1.0);
+            if turn > 0.0 {
+                ctx.request_repaint_after(Duration::from_millis(16));
+            } else {
+                ctx.request_repaint_after(Duration::from_secs_f32(LOGO_PAUSE_SECONDS - phase));
+            }
+            std::f32::consts::TAU * turn * turn * (3.0 - 2.0 * turn)
         } else {
             0.0
         };
@@ -427,20 +461,20 @@ impl Metrics {
             .show(&ctx, |ui| {
                 ui.set_width((ctx.content_rect().width() - 48.0).clamp(200.0, 430.0));
                 ui.vertical_centered(|ui| {
-                    let size = 82.0 + (1.8 * time).sin() * 3.0;
+                    let size = 82.0;
                     let (rect, _) =
                         ui.allocate_exact_size(Vec2::splat(124.0), egui::Sense::hover());
-                    let center = rect.center() + Vec2::new(0.0, (1.8 * time).sin() * 3.0);
+                    let center = rect.center();
                     let blue = Color32::from_rgb(31, 122, 220);
                     ui.painter()
                         .circle_filled(center, 54.0, blue.gamma_multiply(0.10));
                     ui.painter().circle_stroke(
                         center,
-                        53.0 + (1.8 * time).sin() * 3.0,
+                        53.0,
                         Stroke::new(1.0, blue.gamma_multiply(0.26)),
                     );
                     egui::Image::from_texture((self.logo.id(), Vec2::splat(size)))
-                        .rotate((1.3 * time).sin() * 0.10, Vec2::splat(0.5))
+                        .rotate(angle, Vec2::splat(0.5))
                         .paint_at(ui, Rect::from_center_size(center, Vec2::splat(size)));
                     ui.add_space(16.0);
                     ui.label(
@@ -450,7 +484,9 @@ impl Metrics {
                     );
                     ui.add_space(12.0);
                     if let Some(progress) = &self.progress {
-                        ui.add(egui::Spinner::new().size(23.0));
+                        if !self.segment_progress(ui, 300.0) {
+                            ui.add(egui::Spinner::new().size(23.0));
+                        }
                         ui.weak(progress);
                     } else if let Some(error) = &self.source_error {
                         let title = if self.job == Job::Open {
