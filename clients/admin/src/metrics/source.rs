@@ -538,6 +538,7 @@ mod tests {
     use db_rs::View;
     use db_rs::config::Config;
     use lb::model::account::Account as CoreAccount;
+    use lb::model::entropy::Entropy;
     use lb::model::file_like::FileLike;
     use lb::model::file_metadata::Owner;
     use lb::model::meta::Meta;
@@ -549,7 +550,7 @@ mod tests {
         let mut db = ServerDb::init(&Config::default().log_location(path.to_path_buf())).unwrap();
         let account = CoreAccount::new("metrics".into(), "http://localhost".into());
         let owner = Owner(account.public_key());
-        let root = Meta::create_root(&account)
+        let root = Meta::create_root(&account, &Entropy::default())
             .unwrap()
             .sign_with(&account)
             .unwrap();
