@@ -1,11 +1,12 @@
 use super::history::{DAY, History};
 use super::queries::{self, Cohort, Retention, SeriesPoint};
-use super::{Result, format_bytes, read_cache, source};
+use super::{Result, cache_sync_time, format_bytes, read_cache, source};
 use eframe::egui::{
     self, Align2, Color32, Context, FontId, Frame, Pos2, Rect, RichText, Stroke, Ui, Vec2,
 };
 use std::path::PathBuf;
 use std::sync::{Arc, mpsc};
+use std::time::Duration;
 use time::OffsetDateTime;
 use time::macros::format_description;
 use workspace_rs::theme::icons::Icon;
@@ -15,6 +16,7 @@ const DATE: &[time::format_description::BorrowedFormatItem<'static>] =
     format_description!("[year]-[month]-[day]");
 const TIME: &[time::format_description::BorrowedFormatItem<'static>] =
     format_description!("[year]-[month]-[day] [hour]:[minute] UTC");
+const STALE_AFTER_MS: i64 = 60 * 60 * 1000;
 const COLORS: [Color32; 4] = [
     Color32::from_rgb(90, 125, 241),
     Color32::from_rgb(33, 155, 128),
@@ -38,8 +40,19 @@ enum Job {
 
 enum Update {
     Progress(String),
-    Loaded(Result<Option<History>>, Job, Option<u64>),
+    Loaded(Result<Option<History>>, Job, Transfer),
     Analysis((i64, i64), Arc<History>, Analysis),
+}
+
+#[derive(Default)]
+struct Transfer {
+    synced_at: Option<i64>,
+    bytes: Option<u64>,
+}
+
+enum DataSource {
+    Production(Transfer),
+    Local(String),
 }
 
 struct Analysis {
@@ -57,6 +70,7 @@ enum Sort {
 }
 
 pub struct Metrics {
+    logo: egui::TextureHandle,
     directory: PathBuf,
     remote: String,
     path: String,
@@ -70,7 +84,9 @@ pub struct Metrics {
     at: Option<i64>,
     sequence_text: String,
     exact: Option<u64>,
-    source_status: Option<String>,
+    data_source: Option<DataSource>,
+    source_error: Option<String>,
+    job: Job,
     progress: Option<String>,
     query: Option<Analysis>,
     sort: Sort,
@@ -82,9 +98,13 @@ pub struct Metrics {
 }
 
 impl Metrics {
-    pub fn new(directory: PathBuf, remote: String, logs: Option<PathBuf>, ctx: &Context) -> Self {
+    pub fn new(
+        directory: PathBuf, remote: String, logs: Option<PathBuf>, logo: egui::TextureHandle,
+        ctx: &Context,
+    ) -> Self {
         let (sender, updates) = mpsc::channel();
         let mut app = Self {
+            logo,
             directory,
             remote,
             path: String::new(),
@@ -98,7 +118,9 @@ impl Metrics {
             at: None,
             sequence_text: String::new(),
             exact: None,
-            source_status: None,
+            data_source: None,
+            source_error: None,
+            job: Job::Cached,
             progress: None,
             query: None,
             sort: Sort::Storage,
@@ -123,15 +145,23 @@ impl Metrics {
             return;
         }
         self.busy = true;
-        self.progress = Some("Opening logs…".into());
-        self.source_status = None;
+        self.job = job;
+        self.progress = Some(
+            match job {
+                Job::Open => "Opening local logs…",
+                Job::Cached => "Opening the local cache…",
+                Job::Refresh => "Connecting to production…",
+            }
+            .into(),
+        );
+        self.source_error = None;
         let sender = self.sender.clone();
         let ctx = ctx.clone();
         let directory = self.directory.clone();
         let remote = self.remote.clone();
         let path = PathBuf::from(&self.path);
         std::thread::spawn(move || {
-            let mut transferred = None;
+            let mut transfer = Transfer::default();
             let result = match job {
                 Job::Open => source::local(&path).map(Some),
                 Job::Cached => read_cache(&directory),
@@ -140,11 +170,14 @@ impl Metrics {
                     ctx.request_repaint();
                 })
                 .map(|(history, bytes)| {
-                    transferred = Some(bytes);
+                    transfer.bytes = Some(bytes);
                     Some(history)
                 }),
             };
-            let _ = sender.send(Update::Loaded(result, job, transferred));
+            if job != Job::Open && matches!(&result, Ok(Some(_))) {
+                transfer.synced_at = cache_sync_time(&directory);
+            }
+            let _ = sender.send(Update::Loaded(result, job, transfer));
             ctx.request_repaint();
         });
     }
@@ -163,7 +196,7 @@ impl Metrics {
                         self.query = Some(analysis);
                     }
                 }
-                Update::Loaded(result, job, bytes) => {
+                Update::Loaded(result, job, transfer) => {
                     self.busy = false;
                     self.progress = None;
                     match result {
@@ -173,16 +206,9 @@ impl Metrics {
                                 .first()
                                 .zip(history.anchors.last())
                                 .map(|(&(start, _), &(end, _))| (start, end));
-                            self.source_status = Some(match job {
-                                Job::Open => self.path.clone(),
-                                Job::Cached => "Production cache".to_owned(),
-                                Job::Refresh if bytes == Some(0) => {
-                                    "Up to date · 0 log bytes fetched".to_owned()
-                                }
-                                Job::Refresh => format!(
-                                    "{} of log data fetched",
-                                    format_bytes(bytes.unwrap_or_default())
-                                ),
+                            self.data_source = Some(match job {
+                                Job::Open => DataSource::Local(self.path.clone()),
+                                Job::Cached | Job::Refresh => DataSource::Production(transfer),
                             });
                             self.history = Some(Arc::new(history));
                             self.selected_account = None;
@@ -205,8 +231,10 @@ impl Metrics {
                                 self.at = None;
                             }
                         }
+                        Ok(None) if job == Job::Cached => self.load(Job::Refresh, ctx),
+                        Err(_) if job == Job::Cached => self.load(Job::Refresh, ctx),
                         Ok(None) => {}
-                        Err(error) => self.source_status = Some(error.to_string()),
+                        Err(error) => self.source_error = Some(error.to_string()),
                     }
                 }
             }
@@ -297,29 +325,151 @@ impl Metrics {
                     });
                     let source = Button::default().icon(&Icon::SYNC.size(16.0)).text("Source").show(ui);
                     egui::Popup::menu(&source).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
-                        if ui.add_enabled(!self.busy, egui::Button::new("Refresh from production")).clicked() {
-                            self.load(Job::Refresh, &ctx);
-                        }
-                        ui.horizontal(|ui| {
-                            ui.add(egui::TextEdit::singleline(&mut self.path).desired_width(215.0).hint_text("Local ServerV6 directory"));
-                            if ui.add_enabled(!self.busy && !self.path.is_empty(), egui::Button::new("Open local logs")).clicked() {
-                                self.load(Job::Open, &ctx);
-                            }
-                        });
-                        if let Some(progress) = &self.progress { ui.label(progress); }
-                        if let Some(status) = &self.source_status { ui.label(status); }
-                        if let Some(history) = &self.history {
-                            ui.label(format!("Sequences {}–{}", history.oldest, history.latest));
-                            if let Some((first, last)) = history.anchors.first().zip(history.anchors.last()) {
-                                ui.label(format!("{} – {}", timestamp(first.0), timestamp(last.0)));
-                            }
-                            if !history.gaps.is_empty() { ui.label(format!("{} gaps in coverage", history.gaps.len())); }
-                            if history.partial_tail { ui.label("Import ends at the last complete transaction."); }
-                        }
+                        self.source_panel(ui, &ctx);
                     });
                 });
             });
         });
+    }
+
+    fn source_panel(&mut self, ui: &mut Ui, ctx: &Context) {
+        match &self.data_source {
+            Some(DataSource::Production(transfer)) => {
+                if let Some(synced_at) = transfer.synced_at {
+                    let age = current_time().saturating_sub(synced_at);
+                    let label = if self
+                        .history
+                        .as_ref()
+                        .is_some_and(|history| history.partial_tail)
+                    {
+                        "Production data · incomplete"
+                    } else if age >= STALE_AFTER_MS {
+                        "Production data · stale"
+                    } else {
+                        ctx.request_repaint_after(Duration::from_millis(
+                            (STALE_AFTER_MS - age) as u64,
+                        ));
+                        "Production data · fresh"
+                    };
+                    ui.strong(label);
+                    ui.weak(format!("Last synced {}", timestamp(synced_at)));
+                } else {
+                    ui.strong("Production cache");
+                    ui.weak("Sync time unavailable");
+                }
+                if let Some(bytes) = transfer.bytes {
+                    ui.weak(if bytes == 0 {
+                        "Already current · 0 log bytes downloaded".into()
+                    } else {
+                        format!("{} of log data downloaded", format_bytes(bytes))
+                    });
+                }
+            }
+            Some(DataSource::Local(path)) => {
+                ui.strong("Local copy");
+                ui.weak(path);
+            }
+            None => {}
+        }
+        if ui
+            .add_enabled(!self.busy, egui::Button::new("Sync to latest"))
+            .clicked()
+        {
+            self.load(Job::Refresh, ctx);
+        }
+        if let Some(progress) = &self.progress {
+            ui.label(progress);
+        }
+        if let Some(error) = &self.source_error {
+            ui.colored_label(ui.visuals().error_fg_color, error);
+        }
+        if let Some(history) = &self.history {
+            ui.weak(format!("Sequences {}–{}", history.oldest, history.latest));
+            if let Some((first, last)) = history.anchors.first().zip(history.anchors.last()) {
+                ui.weak(format!("{} – {}", timestamp(first.0), timestamp(last.0)));
+            }
+            if !history.gaps.is_empty() {
+                ui.weak(format!("{} gaps in coverage", history.gaps.len()));
+            }
+        }
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.path)
+                    .desired_width(215.0)
+                    .hint_text("Local ServerV6 directory"),
+            );
+            if ui
+                .add_enabled(
+                    !self.busy && !self.path.is_empty(),
+                    egui::Button::new("Open local logs"),
+                )
+                .clicked()
+            {
+                self.load(Job::Open, ctx);
+            }
+        });
+    }
+
+    fn onboarding(&mut self, ui: &mut Ui) {
+        ui.painter()
+            .rect_filled(ui.max_rect(), 0.0, ui.visuals().panel_fill);
+        let ctx = ui.ctx().clone();
+        let animate = self.busy && ui.style().animation_time > 0.0;
+        let time = if animate {
+            ctx.request_repaint_after(Duration::from_millis(16));
+            ctx.input(|input| input.time) as f32
+        } else {
+            0.0
+        };
+        egui::Area::new(egui::Id::unique("metrics onboarding"))
+            .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(&ctx, |ui| {
+                ui.set_width((ctx.content_rect().width() - 48.0).clamp(200.0, 430.0));
+                ui.vertical_centered(|ui| {
+                    let size = 82.0 + (1.8 * time).sin() * 3.0;
+                    let (rect, _) =
+                        ui.allocate_exact_size(Vec2::splat(124.0), egui::Sense::hover());
+                    let center = rect.center() + Vec2::new(0.0, (1.8 * time).sin() * 3.0);
+                    let blue = Color32::from_rgb(31, 122, 220);
+                    ui.painter()
+                        .circle_filled(center, 54.0, blue.gamma_multiply(0.10));
+                    ui.painter().circle_stroke(
+                        center,
+                        53.0 + (1.8 * time).sin() * 3.0,
+                        Stroke::new(1.0, blue.gamma_multiply(0.26)),
+                    );
+                    egui::Image::from_texture((self.logo.id(), Vec2::splat(size)))
+                        .rotate((1.3 * time).sin() * 0.10, Vec2::splat(0.5))
+                        .paint_at(ui, Rect::from_center_size(center, Vec2::splat(size)));
+                    ui.add_space(16.0);
+                    ui.label(
+                        RichText::new("Lockbook Metrics Explorer")
+                            .size(32.0)
+                            .strong(),
+                    );
+                    ui.add_space(12.0);
+                    if let Some(progress) = &self.progress {
+                        ui.add(egui::Spinner::new().size(23.0));
+                        ui.weak(progress);
+                    } else if let Some(error) = &self.source_error {
+                        let title = if self.job == Job::Open {
+                            "Couldn’t open local logs"
+                        } else {
+                            "Couldn’t sync production logs"
+                        };
+                        ui.label(title);
+                        ui.colored_label(ui.visuals().error_fg_color, error);
+                        if self.job == Job::Refresh {
+                            ui.weak("Check your gcloud login and production SSH access.");
+                        }
+                        ui.add_space(10.0);
+                        if ui.button("Retry").clicked() {
+                            self.load(self.job, &ctx);
+                        }
+                    }
+                });
+            });
     }
 
     fn state_control(&mut self, ui: &mut Ui, history: &History) {
@@ -682,6 +832,10 @@ impl eframe::App for Metrics {
     fn ui(&mut self, ui: &mut Ui, _: &mut eframe::Frame) {
         workspace_rs::font::poll(ui.ctx());
         self.updates(ui.ctx());
+        let Some(history) = self.history.clone() else {
+            self.onboarding(ui);
+            return;
+        };
         let available_width = ui.available_width();
         let toolbar = egui::Area::new(egui::Id::unique("metrics toolbar"))
             .anchor(Align2::CENTER_TOP, [0.0, 16.0])
@@ -694,20 +848,6 @@ impl eframe::App for Metrics {
             .inner_margin(egui::Margin::same(20))
             .show(ui, |ui| {
                 ui.add_space(toolbar.response.rect.height() + 12.0);
-                let Some(history) = self.history.clone() else {
-                    ui.vertical_centered(|ui| {
-                        if let Some(progress) = &self.progress {
-                            ui.spinner();
-                            ui.label(progress);
-                        } else {
-                            ui.label("Open a log directory or refresh from production.");
-                            if let Some(status) = &self.source_status {
-                                ui.weak(status);
-                            }
-                        }
-                    });
-                    return;
-                };
                 self.state_control(ui, &history);
                 ui.add_space(8.0);
                 if self.query.is_none() && self.range.is_some() {

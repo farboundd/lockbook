@@ -35,6 +35,17 @@ fn read_cache(directory: &Path) -> Result<Option<History>> {
     Ok(db.take()?)
 }
 
+fn cache_sync_time(directory: &Path) -> Option<i64> {
+    let modified = directory
+        .join(CACHE_DIR)
+        .join("db.0.log")
+        .metadata()
+        .ok()?
+        .modified()
+        .ok()?;
+    Some(time::OffsetDateTime::from(modified).unix_timestamp() * 1000)
+}
+
 fn write_cache(directory: &Path, history: History) -> Result<History> {
     let view = directory.join(CACHE_DIR);
     std::fs::create_dir_all(&view)?;
@@ -66,6 +77,15 @@ fn format_bytes(bytes: u64) -> String {
 pub fn run(logs: Option<PathBuf>, remote: String) -> Result<()> {
     let directory =
         PathBuf::from(lb::model::core_config::Config::writeable_path("admin")).join("metrics");
+    let logo = image::load_from_memory_with_format(
+        include_bytes!("../../../desktop/lockbook.png"),
+        image::ImageFormat::Png,
+    )?
+    .into_rgba8();
+    let logo = eframe::egui::ColorImage::from_rgba_unmultiplied(
+        [logo.width() as usize, logo.height() as usize],
+        logo.as_raw(),
+    );
     const MSAA_SAMPLES: u16 = 1;
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
@@ -76,7 +96,7 @@ pub fn run(logs: Option<PathBuf>, remote: String) -> Result<()> {
         ..Default::default()
     };
     eframe::run_native(
-        "Lockbook Metrics",
+        "Lockbook Metrics Explorer",
         options,
         Box::new(move |context| {
             let render_state = context
@@ -92,7 +112,10 @@ pub fn run(logs: Option<PathBuf>, remote: String) -> Result<()> {
                 u32::from(MSAA_SAMPLES),
             );
             workspace_rs::theme::visuals::init(&context.egui_ctx);
-            Ok(Box::new(ui::Metrics::new(directory, remote, logs, &context.egui_ctx)))
+            let logo = context
+                .egui_ctx
+                .load_texture("Lockbook logo", logo, Default::default());
+            Ok(Box::new(ui::Metrics::new(directory, remote, logs, logo, &context.egui_ctx)))
         }),
     )
     .map_err(|error| error.to_string().into())
