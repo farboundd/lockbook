@@ -680,6 +680,7 @@ impl Metrics {
 
 impl eframe::App for Metrics {
     fn ui(&mut self, ui: &mut Ui, _: &mut eframe::Frame) {
+        workspace_rs::font::poll(ui.ctx());
         self.updates(ui.ctx());
         let available_width = ui.available_width();
         let toolbar = egui::Area::new(egui::Id::unique("metrics toolbar"))

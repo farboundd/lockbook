@@ -568,22 +568,19 @@ fn init_with_renderer(mut renderer: RendererState<'static>) -> WgpuLockbook<'sta
         app.settings.text_font.as_deref(),
         app.settings.code_font.as_deref(),
     );
-    let mut fonts = egui::FontDefinitions::default();
-    workspace_rs::register_fonts(&mut fonts);
-    renderer.context.set_fonts(fonts);
     egui_extras::install_image_loaders(&renderer.context);
 
-    let font_system = workspace_rs::register_font_system(&renderer.context);
+    let context = renderer.context.clone();
     let sample_count = renderer.backend().sample_count;
     let format =
         RendererState::text_format(&renderer.backend().adapter, &renderer.backend().surface);
     let backend = renderer.backend_mut();
-    workspace_rs::register_render_callback_resources(
+    workspace_rs::register_egui_renderer(
+        &context,
         &backend.device,
         &backend.queue,
         format,
         &mut backend.renderer,
-        font_system,
         sample_count,
     );
 

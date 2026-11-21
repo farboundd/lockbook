@@ -1,7 +1,7 @@
 //! Design install: theme, fonts, zero `item_spacing`, type scale, hover time.
 //! Mode preference defaults to system; pin via [`set_mode_preference`].
 
-use egui::{Context, FontDefinitions, Id, Theme as EguiTheme, Vec2};
+use egui::{Context, Id, Theme as EguiTheme, Vec2};
 use workspace_rs::theme::palette_v2::{Mode, Palette, Theme, ThemeExt};
 
 use super::chrome::HOVER_ANIM_SECS;
@@ -149,9 +149,7 @@ fn ensure_fonts(ctx: &Context) {
     if ctx.data(|d| d.get_temp::<()>(id).is_some()) {
         return;
     }
-    let mut fonts = FontDefinitions::default();
-    workspace_rs::register_fonts(&mut fonts);
-    ctx.set_fonts(fonts);
+    workspace_rs::install_egui_fonts(ctx);
     ctx.data_mut(|d| d.insert_temp(id, ()));
 }
 

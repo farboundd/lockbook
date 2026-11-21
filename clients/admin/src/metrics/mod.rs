@@ -66,7 +66,10 @@ fn format_bytes(bytes: u64) -> String {
 pub fn run(logs: Option<PathBuf>, remote: String) -> Result<()> {
     let directory =
         PathBuf::from(lb::model::core_config::Config::writeable_path("admin")).join("metrics");
+    const MSAA_SAMPLES: u16 = 1;
     let options = eframe::NativeOptions {
+        renderer: eframe::Renderer::Wgpu,
+        multisampling: MSAA_SAMPLES,
         viewport: eframe::egui::ViewportBuilder::default()
             .with_inner_size([1100.0, 780.0])
             .with_min_inner_size([560.0, 420.0]),
@@ -76,9 +79,18 @@ pub fn run(logs: Option<PathBuf>, remote: String) -> Result<()> {
         "Lockbook Metrics",
         options,
         Box::new(move |context| {
-            let mut fonts = eframe::egui::FontDefinitions::default();
-            workspace_rs::register_fonts(&mut fonts);
-            context.egui_ctx.set_fonts(fonts);
+            let render_state = context
+                .wgpu_render_state
+                .as_ref()
+                .ok_or("Lockbook Metrics requires a wgpu renderer")?;
+            workspace_rs::register_egui_renderer(
+                &context.egui_ctx,
+                &render_state.device,
+                &render_state.queue,
+                render_state.target_format,
+                &mut render_state.renderer.write(),
+                u32::from(MSAA_SAMPLES),
+            );
             workspace_rs::theme::visuals::init(&context.egui_ctx);
             Ok(Box::new(ui::Metrics::new(directory, remote, logs, &context.egui_ctx)))
         }),

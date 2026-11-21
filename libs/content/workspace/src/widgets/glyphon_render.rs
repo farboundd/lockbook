@@ -78,6 +78,23 @@ fn font_system(load: impl FnOnce(&mut fontdb::Database)) -> FontSystem {
     FontSystem::new_with_locale_and_db_and_fallback("en-US".into(), db, fallback)
 }
 
+/// Installs the workspace fonts and Glyphon resources before the first egui frame.
+pub fn register_egui_renderer(
+    ctx: &egui::Context, device: &Device, queue: &Queue, texture_format: TextureFormat,
+    renderer: &mut Renderer, msaa_samples: u32,
+) {
+    crate::install_egui_fonts(ctx);
+    let font_system = register_font_system(ctx);
+    register_render_callback_resources(
+        device,
+        queue,
+        texture_format,
+        renderer,
+        font_system,
+        msaa_samples,
+    );
+}
+
 pub fn register_render_callback_resources(
     device: &Device, queue: &Queue, texture_format: TextureFormat, renderer: &mut Renderer,
     font_system: Arc<Mutex<FontSystem>>, msaa_samples: u32,

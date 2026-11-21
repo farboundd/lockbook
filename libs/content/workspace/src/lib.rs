@@ -45,7 +45,13 @@ pub fn register_fonts(fonts: &mut epaint::text::FontDefinitions) {
     tab::markdown_editor::register_fonts(fonts)
 }
 
+pub fn install_egui_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    register_fonts(&mut fonts);
+    ctx.set_fonts(fonts);
+}
+
 pub use widgets::glyphon_render::{
     GlyphonRenderCallbackResources, GlyphonRendererCallback, Printing, TextBufferArea, paint_text,
-    printing, register_font_system, register_render_callback_resources,
+    printing, register_egui_renderer, register_font_system, register_render_callback_resources,
 };
