@@ -1,3 +1,4 @@
+use super::axis::{Unit, YAxis};
 use super::history::{DAY, History};
 use super::queries::{self, Cohort, Retention, SeriesPoint};
 use super::source::RefreshProgress;
@@ -943,24 +944,6 @@ impl eframe::App for Metrics {
 type Line = (&'static str, fn(&SeriesPoint) -> Option<f64>);
 type PlotSeries<'a> = (&'a str, Vec<(i64, Option<f64>)>);
 
-#[derive(Clone, Copy)]
-enum Unit {
-    Count,
-    Bytes,
-    Percent,
-    Hours,
-}
-impl Unit {
-    fn label(self, value: f64) -> String {
-        match self {
-            Self::Count => format!("{value:.0}"),
-            Self::Bytes => format_bytes(value as u64),
-            Self::Percent => format!("{value:.1}%"),
-            Self::Hours => format!("{value:.1} h"),
-        }
-    }
-}
-
 fn chart(
     ui: &mut Ui, title: &str, (start, end): (i64, i64), selected: Option<i64>, unit: Unit,
     series: &[PlotSeries<'_>],
@@ -975,27 +958,39 @@ fn chart(
     }
     let (response, painter) =
         ui.allocate_painter(Vec2::new(ui.available_width(), 138.0), egui::Sense::click());
+    let axis = YAxis::new(
+        unit,
+        series
+            .iter()
+            .flat_map(|(_, values)| values.iter().filter_map(|(_, value)| *value)),
+    );
+    let tick_font = FontId::proportional(11.0);
+    let tick_color = ui.visuals().weak_text_color();
+    let ticks: Vec<_> = axis
+        .ticks()
+        .map(|(value, label)| {
+            let text = painter.layout_no_wrap(label, tick_font.clone(), tick_color);
+            (value, text)
+        })
+        .collect();
+    let label_width = ticks
+        .iter()
+        .map(|(_, text)| text.size().x)
+        .fold(0.0_f32, f32::max);
     let rect = Rect::from_min_max(
-        response.rect.min + Vec2::new(75.0, 11.0),
+        response.rect.min + Vec2::new(label_width.max(62.0) + 13.0, 11.0),
         response.rect.max - Vec2::new(16.0, 24.0),
     );
-    let maximum = series
-        .iter()
-        .flat_map(|(_, values)| values.iter().filter_map(|(_, value)| *value))
-        .fold(0.0f64, f64::max);
-    let limit = if matches!(unit, Unit::Percent) { 100.0 } else { maximum.max(1.0) };
     let span = (end - start).max(1) as f64;
     let x = |time: i64| rect.left() + ((time - start) as f64 / span) as f32 * rect.width();
-    let y = |value: f64| rect.bottom() - (value / limit).clamp(0.0, 1.0) as f32 * rect.height();
-    for value in [0.0, limit / 2.0, limit] {
+    let y = |value: f64| rect.bottom() - axis.fraction(value) as f32 * rect.height();
+    for (value, text) in ticks {
         let y = y(value);
         painter.hline(rect.x_range(), y, ui.visuals().widgets.noninteractive.bg_stroke);
-        painter.text(
-            Pos2::new(rect.left() - 8.0, y),
-            Align2::RIGHT_CENTER,
-            unit.label(value),
-            FontId::proportional(11.0),
-            ui.visuals().weak_text_color(),
+        painter.galley(
+            Pos2::new(rect.left() - 8.0 - text.size().x, y - text.size().y / 2.0),
+            text,
+            tick_color,
         );
     }
     for (time, align) in [(start, Align2::LEFT_TOP), (end, Align2::RIGHT_TOP)] {
@@ -1016,7 +1011,9 @@ fn chart(
     for (index, (_, values)) in series.iter().enumerate() {
         let mut prior = None;
         for (time, value) in values {
-            let point = value.map(|value| Pos2::new(x(*time), y(value)));
+            let point = value
+                .filter(|value| value.is_finite())
+                .map(|value| Pos2::new(x(*time), y(value)));
             if let Some(point) = point {
                 if let Some(prior) = prior {
                     painter.line_segment([prior, point], Stroke::new(1.5, COLORS[index]));
@@ -1043,7 +1040,7 @@ fn chart(
                 points.iter().min_by_key(|(stamp, _)| stamp.abs_diff(time))
             {
                 closest_time.get_or_insert(stamp);
-                if let Some(value) = value {
+                if let Some(value) = value.filter(|value| value.is_finite()) {
                     painter.circle_filled(Pos2::new(x(stamp), y(value)), 3.0, COLORS[index]);
                     values.push((*name, unit.label(value)));
                 }

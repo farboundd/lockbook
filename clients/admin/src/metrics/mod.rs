@@ -1,3 +1,4 @@
+mod axis;
 mod history;
 mod queries;
 mod source;
