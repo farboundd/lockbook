@@ -22,6 +22,8 @@ const DATE: &[time::format_description::BorrowedFormatItem<'static>] =
     format_description!("[year]-[month]-[day]");
 const TIME: &[time::format_description::BorrowedFormatItem<'static>] =
     format_description!("[year]-[month]-[day] [hour]:[minute] UTC");
+const CHART_MIN_WIDTH: f32 = 240.0;
+const CHART_GAP: f32 = 12.0;
 const STALE_AFTER_MS: i64 = 60 * 60 * 1000;
 const LOGO_TURN_SECONDS: f32 = 1.2;
 const LOGO_PAUSE_SECONDS: f32 = 4.8;
@@ -680,8 +682,10 @@ impl Metrics {
             ("Document storage", Unit::Bytes, &[("Storage", |p| p.storage)]),
             ("Server egress · trailing 30 days", Unit::Bytes, &[("Egress", |p| p.egress)]),
         ];
-        for (title, unit, lines) in fields {
-            let series: Vec<_> = lines
+        let charts = fields.map(|(title, unit, lines)| Chart {
+            title,
+            unit,
+            series: lines
                 .iter()
                 .map(|(label, field)| {
                     (
@@ -693,11 +697,11 @@ impl Metrics {
                             .collect(),
                     )
                 })
-                .collect();
-            if let Some(time) = chart(ui, title, range, self.at, unit, &series) {
-                self.at = Some(time);
-                self.exact = None;
-            }
+                .collect(),
+        });
+        if let Some(time) = chart_grid(ui, range, self.at, &charts) {
+            self.at = Some(time);
+            self.exact = None;
         }
     }
 
@@ -772,9 +776,8 @@ impl Metrics {
                 )
             })
             .collect();
-        if let Some(time) =
-            chart(ui, "Retention by signup date", range, self.at, Unit::Percent, &series)
-        {
+        let chart = Chart { title: "Retention by signup date", unit: Unit::Percent, series };
+        if let Some(time) = chart_grid(ui, range, self.at, &[chart]) {
             self.at = Some(time);
             self.exact = None;
         }
@@ -804,32 +807,32 @@ impl Metrics {
             }
             if let Some(range) = self.range {
                 let times = queries::sample_times(range.0, range.1);
-                for (label, getter) in [
+                let [storage, egress] = [
                     ("Storage", (|s: &super::history::AccountState| s.storage) as fn(_) -> _),
                     ("Cumulative egress", |s| Some(s.egress)),
-                ] {
-                    let values = times
-                        .iter()
-                        .map(|&time| {
-                            (
-                                time,
-                                history
-                                    .sequence_at(time)
-                                    .filter(|seq| history.sequence_covered(*seq))
-                                    .and_then(|seq| account.at(seq))
-                                    .and_then(getter)
-                                    .map(|value| value as f64),
-                            )
-                        })
-                        .collect();
-                    if let Some(time) =
-                        chart(ui, label, range, self.at, Unit::Bytes, &[(label, values)])
-                    {
-                        self.at = Some(time);
-                        self.exact = None;
-                    }
-                }
-                let values = times
+                ]
+                .map(|(label, getter)| Chart {
+                    title: label,
+                    unit: Unit::Bytes,
+                    series: vec![(
+                        label,
+                        times
+                            .iter()
+                            .map(|&time| {
+                                (
+                                    time,
+                                    history
+                                        .sequence_at(time)
+                                        .filter(|seq| history.sequence_covered(*seq))
+                                        .and_then(|seq| account.at(seq))
+                                        .and_then(getter)
+                                        .map(|value| value as f64),
+                                )
+                            })
+                            .collect(),
+                    )],
+                });
+                let hours = times
                     .iter()
                     .map(|&time| {
                         let start = (time - DAY).max(range.0);
@@ -841,14 +844,12 @@ impl Metrics {
                         )
                     })
                     .collect();
-                if let Some(time) = chart(
-                    ui,
-                    "Active hours · trailing day",
-                    range,
-                    self.at,
-                    Unit::Hours,
-                    &[("Hours", values)],
-                ) {
+                let activity = Chart {
+                    title: "Active hours · trailing day",
+                    unit: Unit::Hours,
+                    series: vec![("Hours", hours)],
+                };
+                if let Some(time) = chart_grid(ui, range, self.at, &[storage, egress, activity]) {
                     self.at = Some(time);
                     self.exact = None;
                 }
@@ -1024,24 +1025,54 @@ fn floating_frame(ui: &Ui) -> Frame {
 }
 
 type Line = (&'static str, fn(&SeriesPoint) -> Option<f64>);
-type PlotSeries<'a> = (&'a str, Vec<(i64, Option<f64>)>);
+type PlotSeries = (&'static str, Vec<(i64, Option<f64>)>);
 
-fn chart(
-    ui: &mut Ui, title: &str, (start, end): (i64, i64), selected: Option<i64>, unit: Unit,
-    series: &[PlotSeries<'_>],
+struct Chart {
+    title: &'static str,
+    unit: Unit,
+    series: Vec<PlotSeries>,
+}
+
+fn chart_columns(width: f32, chart_count: usize) -> usize {
+    let fit = ((width + CHART_GAP) / (CHART_MIN_WIDTH + CHART_GAP)) as usize;
+    fit.max(1).min(chart_count)
+}
+
+fn chart_grid(
+    ui: &mut Ui, range: (i64, i64), selected: Option<i64>, charts: &[Chart],
 ) -> Option<i64> {
+    let columns = chart_columns(ui.available_width(), charts.len());
+    if columns == 0 {
+        return None;
+    }
     let cursor_group = ui.scope_id().with("metrics time cursor");
-    let clicked = surface(ui)
-        .show(ui, |ui| chart_content(ui, title, (start, end), selected, unit, series, cursor_group))
-        .inner;
-    ui.add_space(12.0);
+    let mut clicked = None;
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing.x = CHART_GAP;
+        for row in charts.chunks(columns) {
+            let align_headers = row.len() > 1 && row.iter().any(|chart| chart.series.len() > 1);
+            ui.columns(columns, |cells| {
+                for (cell, chart) in cells.iter_mut().zip(row) {
+                    let selection = surface(cell)
+                        .show(cell, |ui| {
+                            chart_content(ui, range, selected, chart, cursor_group, align_headers)
+                        })
+                        .inner;
+                    clicked = selection.or(clicked);
+                }
+            });
+            ui.add_space(CHART_GAP);
+        }
+    });
     clicked
 }
 
 fn chart_content(
-    ui: &mut Ui, title: &str, (start, end): (i64, i64), selected: Option<i64>, unit: Unit,
-    series: &[PlotSeries<'_>], cursor_group: egui::Id,
+    ui: &mut Ui, (start, end): (i64, i64), selected: Option<i64>, chart: &Chart,
+    cursor_group: egui::Id, align_header: bool,
 ) -> Option<i64> {
+    let Chart { title, unit, series } = chart;
+    let compact = ui.available_width() < 260.0;
     let visuals = ui.visuals();
     let tokens = re_ui::design_tokens_of_visuals(visuals);
     let colors = if visuals.dark_mode {
@@ -1062,17 +1093,22 @@ fn chart_content(
     let tick_color = visuals.weak_text_color();
     let cursor_color = visuals.selection.stroke.color;
 
-    ui.label(bold_text(title, 17.0));
-    if series.len() > 1 {
-        ui.horizontal_wrapped(|ui| {
-            for ((label, _), color) in series.iter().zip(colors) {
-                ui.colored_label(color, *label);
-            }
-        });
-    }
+    ui.vertical(|ui| {
+        ui.label(bold_text(*title, 17.0));
+        if series.len() > 1 {
+            ui.horizontal_wrapped(|ui| {
+                for ((label, _), color) in series.iter().zip(colors) {
+                    ui.colored_label(color, *label);
+                }
+            });
+        }
+        if align_header {
+            ui.set_min_height(42.0);
+        }
+    });
 
     let axis = YAxis::new(
-        unit,
+        *unit,
         series
             .iter()
             .flat_map(|(_, values)| values.iter().filter_map(|(_, value)| *value)),
@@ -1087,17 +1123,19 @@ fn chart_content(
             let format = match span {
                 0..240_000 => format_description!("[hour]:[minute]:[second]"),
                 240_000..DAY => format_description!("[hour]:[minute]"),
+                _ if compact => format_description!("[month]-[day]"),
                 _ => DATE,
             };
             format_date(tick.value.round() as i64, format)
         });
     let y_axis = AxisHints::new_y()
-        .min_thickness(72.0)
+        .min_thickness(if compact { 52.0 } else { 72.0 })
         .tick_label_font(FontId::proportional(11.0))
         .tick_label_color(tick_color)
         .formatter(|tick, _| axis.label(tick.value));
 
-    let plot = Plot::new(title)
+    let plot = Plot::new(*title)
+        .id(cursor_group.with(title))
         .height(154.0)
         .custom_x_axes(vec![x_axis])
         .custom_y_axes(vec![y_axis])
@@ -1278,6 +1316,67 @@ mod tests {
     use super::*;
 
     #[test]
+    fn fits_chart_columns_with_room_for_gaps() {
+        assert_eq!(chart_columns(200.0, 9), 1);
+        assert_eq!(chart_columns(491.0, 9), 1);
+        assert_eq!(chart_columns(492.0, 9), 2);
+        assert_eq!(chart_columns(744.0, 9), 3);
+        assert_eq!(chart_columns(996.0, 9), 4);
+        assert_eq!(chart_columns(1800.0, 3), 3);
+        assert_eq!(chart_columns(1800.0, 0), 0);
+    }
+
+    #[test]
+    fn chart_cards_reflow_without_changing_plot_ids() {
+        let ctx = Context::default();
+        re_ui::apply_style_and_install_loaders(&ctx);
+        workspace_rs::install_egui_fonts(&ctx);
+        let charts = ["Users", "Sharing", "Premium"].map(|title| Chart {
+            title,
+            unit: Unit::Count,
+            series: vec![(title, vec![(0, Some(1.0)), (DAY, Some(2.0))])],
+        });
+        let draw = |width| {
+            let mut ids = None;
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(width, 760.0))),
+                ..Default::default()
+            };
+            ctx.run_ui(input, |ui| {
+                Frame::new()
+                    .inner_margin(egui::Margin::symmetric(20, 0))
+                    .show(ui, |ui| {
+                        let cursor_group = ui.scope_id().with("metrics time cursor");
+                        ids = Some(
+                            charts
+                                .each_ref()
+                                .map(|chart| cursor_group.with(chart.title)),
+                        );
+                        chart_grid(ui, (0, DAY), None, &charts);
+                    });
+            })
+            .drop_without_applying_deltas();
+            let ids = ids.unwrap();
+            let frames = ids.map(|id| {
+                *egui_plot::PlotMemory::load(&ctx, id)
+                    .unwrap()
+                    .transform()
+                    .frame()
+            });
+            (ids, frames)
+        };
+
+        let (wide_ids, [first, second, third]) = draw(560.0);
+        assert_eq!(first.top(), second.top());
+        assert!(first.right() < second.left());
+        assert!(first.bottom() < third.top());
+        let (narrow_ids, [first, second, third]) = draw(490.0);
+        assert_eq!(wide_ids, narrow_ids);
+        assert_eq!(first.left(), second.left());
+        assert!(first.bottom() < second.top() && second.bottom() < third.top());
+    }
+
+    #[test]
     fn labels_only_the_current_utc_day_as_present() {
         let today = parse_date("2026-11-21").unwrap();
         let yesterday = today - DAY;
@@ -1295,7 +1394,11 @@ mod tests {
         let start = 1_700_000_000_000;
         let middle = start + DAY;
         let end = middle + DAY;
-        let series = [("Users", vec![(start, Some(42.0)), (middle, None), (end, Some(45.0))])];
+        let charts = [Chart {
+            title: "Users",
+            unit: Unit::Count,
+            series: vec![("Users", vec![(start, Some(42.0)), (middle, None), (end, Some(45.0))])],
+        }];
         let pointer = egui::pos2(400.0, 75.0);
         let mut selection = None;
 
@@ -1306,7 +1409,7 @@ mod tests {
                 ..Default::default()
             };
             ctx.run_ui(input, |ui| {
-                selection = chart(ui, "Users", (start, end), None, Unit::Count, &series);
+                selection = chart_grid(ui, (start, end), None, &charts);
             })
             .drop_without_applying_deltas();
         };
