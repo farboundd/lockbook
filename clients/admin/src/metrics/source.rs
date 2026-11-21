@@ -155,23 +155,25 @@ fn scan_from(
 ) -> Result<Tail> {
     let file = File::open(path)?;
     let length = file.metadata()?.len();
-    let mut reader = BufReader::new(file);
+    let mut reader = BufReader::with_capacity(64 * 1024, file);
     if tail.offset > length || (tail.closed && tail.offset != length) {
         return Err(invalid(format!("cached bytes changed in segment {number}")));
     }
     reader.seek(SeekFrom::Start(tail.offset))?;
     let mut first = tail.offset == 0;
     tail.partial = false;
+    let mut frame = Vec::new();
     loop {
-        let frame = match read_frame(&mut reader, length)? {
-            Frame::Complete(bytes) => bytes,
+        let size = match read_frame(&mut reader, length - tail.offset, &mut frame)? {
+            Frame::Complete(size) => size,
             Frame::End => break,
             Frame::Partial => {
                 tail.partial = true;
                 break;
             }
         };
-        match decode::<Entry<'_>>(&frame)? {
+        let next_offset = tail.offset + 8 + size as u64;
+        match decode::<Entry<'_>>(&frame[..size])? {
             Entry::Events { seq_no, payload } => {
                 let baseline = first && number != 0;
                 let expected =
@@ -187,27 +189,32 @@ fn scan_from(
             }
             Entry::Snapshot => {
                 tail.closed = true;
-                if reader.stream_position()? != length {
+                if next_offset != length {
                     return Err(invalid(format!(
                         "segment {number} has data after its rotation marker"
                     )));
                 }
             }
         }
-        tail.offset = reader.stream_position()?;
+        tail.offset = next_offset;
         first = false;
     }
     Ok(tail)
 }
 
-fn replay(segments: Vec<(u64, PathBuf, u64)>, observed: Option<i64>) -> Result<History> {
+fn replay(
+    segments: Vec<(u64, PathBuf, u64)>, observed: Option<i64>, progress: impl Fn(RefreshProgress),
+) -> Result<History> {
     if segments.is_empty() {
         return Err(invalid("no db.<sequence>.log files in this directory"));
     }
     let mut replay = Replay::default();
     replay.history.oldest = segments[0].0;
     let mut prior = None::<Tail>;
-    let last_index = segments.len() - 1;
+    let total = segments.len();
+    let last_index = total - 1;
+    let mut last_update = Instant::now();
+    progress(RefreshProgress::Message(format!("Replaying segment 1 of {total}…")));
     for (index, (number, path, mut skip)) in segments.into_iter().enumerate() {
         let continuous = prior
             .as_ref()
@@ -231,6 +238,13 @@ fn replay(segments: Vec<(u64, PathBuf, u64)>, observed: Option<i64>) -> Result<H
         }
         let tail = scan(&path, number, skip, |seq, data, baseline| {
             if !baseline || !continuous {
+                if last_update.elapsed() >= Duration::from_millis(250) {
+                    progress(RefreshProgress::Message(format!(
+                        "Replaying segment {} of {total} · transaction {seq}",
+                        index + 1
+                    )));
+                    last_update = Instant::now();
+                }
                 replay.apply(seq, data, baseline)?;
             }
             Ok(())
@@ -249,12 +263,12 @@ fn replay(segments: Vec<(u64, PathBuf, u64)>, observed: Option<i64>) -> Result<H
     Ok(replay.history)
 }
 
-pub fn local(path: &Path) -> Result<History> {
+pub fn local(path: &Path, progress: impl Fn(RefreshProgress)) -> Result<History> {
     let segments = local_segments(path)?;
     let nested = path.join("ServerV6");
     let segments =
         if segments.is_empty() && nested.is_dir() { local_segments(&nested)? } else { segments };
-    replay(segments, None)
+    replay(segments, None, progress)
 }
 
 fn local_segments(path: &Path) -> Result<Vec<(u64, PathBuf, u64)>> {
@@ -533,7 +547,6 @@ fn refresh_cache(
             return super::write_cache(directory, history);
         }
     }
-    progress(RefreshProgress::Message("Replaying transactions…".into()));
     let mut history = replay(
         manifest
             .segments
@@ -543,7 +556,9 @@ fn refresh_cache(
             })
             .collect(),
         Some(inventory.observed),
+        &progress,
     )?;
+    progress(RefreshProgress::Message("Saving the local cache…".into()));
     history.import_signature = Some(signature);
     super::write_cache(directory, history)
 }
@@ -554,34 +569,42 @@ mod tests {
     use db_rs::View;
     use db_rs::config::Config;
     use lb::model::account::Account as CoreAccount;
+    use lb::model::api::METADATA_FEE;
     use lb::model::entropy::Entropy;
     use lb::model::file_like::FileLike;
-    use lb::model::file_metadata::Owner;
+    use lb::model::file_metadata::{FileType, Owner};
     use lb::model::meta::Meta;
     use lb::model::server_meta::IntoServerMeta;
     use lockbook_server_lib::guard::ServerTx;
     use lockbook_server_lib::schema::{Account, ServerDb};
 
     fn fixture(path: &Path) -> (ServerDb, Owner) {
-        let mut db = ServerDb::init(&Config::default().log_location(path.to_path_buf())).unwrap();
         let account = CoreAccount::new("metrics".into(), "http://localhost".into());
+        (fixture_for_account(path, &account), Owner(account.public_key()))
+    }
+
+    fn fixture_for_account(path: &Path, account: &CoreAccount) -> ServerDb {
+        let mut db = ServerDb::init(&Config::default().log_location(path.to_path_buf())).unwrap();
         let owner = Owner(account.public_key());
-        let root = Meta::create_root(&account, &Entropy::default())
+        let root = Meta::create_root(account, &Entropy::default())
             .unwrap()
-            .sign_with(&account)
+            .sign_with(account)
             .unwrap();
         let created = root.timestamped_value.timestamp;
         let root = root.add_time(created as u64);
         let mut tx = ServerTx::begin(&mut db).unwrap();
         tx.accounts
-            .insert(owner, Account { username: account.username, billing_info: Default::default() })
+            .insert(
+                owner,
+                Account { username: account.username.clone(), billing_info: Default::default() },
+            )
             .unwrap();
         tx.metas.insert(*root.id(), root.clone()).unwrap();
         tx.owned_files.insert(owner, *root.id()).unwrap();
         tx.shared_files.create_key(owner).unwrap();
         tx.file_children.create_key(*root.id()).unwrap();
         tx.end().unwrap();
-        (db, owner)
+        db
     }
 
     fn activity(db: &mut ServerDb, owner: Owner, time: u64) {
@@ -646,7 +669,7 @@ mod tests {
         db.snapshot().unwrap();
         let mut ranges = Vec::new();
         let history = import(source.path(), cache.path(), &mut ranges, None).unwrap();
-        let local_history = local(source.path()).unwrap();
+        let local_history = local(source.path(), |_| {}).unwrap();
         let catalog = inventory(source.path());
         assert_eq!(ranges.len(), 2);
         assert_eq!(ranges[0].0, 0);
@@ -666,6 +689,119 @@ mod tests {
         assert_eq!(ranges[0].0, 3);
         assert_eq!(ranges[0].1, catalog.segments[2].first_end);
         assert_eq!(updated.latest, 4);
+    }
+
+    #[test]
+    fn replay_applies_size_deltas_only_to_visible_files() {
+        let source = tempfile::tempdir().unwrap();
+        let account = CoreAccount::new("metrics".into(), "http://localhost".into());
+        let owner = Owner(account.public_key());
+        let mut db = fixture_for_account(source.path(), &account);
+        let (root, meta) = db.schema.metas.iter().next().unwrap();
+        let (root, created) = (*root, meta.version);
+        let folder = lb::Uuid::new_v4();
+        let document = lb::Uuid::new_v4();
+        let mut folder_meta =
+            Meta::create(folder, [1; 32], &owner.0, root, &[2; 32], "folder", FileType::Folder)
+                .unwrap();
+        let mut doc_meta = Meta::create(
+            document,
+            [3; 32],
+            &owner.0,
+            folder,
+            &[1; 32],
+            "document",
+            FileType::Document,
+        )
+        .unwrap();
+        doc_meta.set_hmac_and_size(Some([4; 32]), Some(100));
+        let mut tx = ServerTx::begin(&mut db).unwrap();
+        tx.metas
+            .insert(
+                folder,
+                folder_meta
+                    .clone()
+                    .sign_with(&account)
+                    .unwrap()
+                    .add_time(created + 1),
+            )
+            .unwrap();
+        tx.metas
+            .insert(
+                document,
+                doc_meta
+                    .clone()
+                    .sign_with(&account)
+                    .unwrap()
+                    .add_time(created + 1),
+            )
+            .unwrap();
+        tx.owned_files.insert(owner, folder).unwrap();
+        tx.owned_files.insert(owner, document).unwrap();
+        tx.file_children.insert(root, folder).unwrap();
+        tx.file_children.insert(folder, document).unwrap();
+        tx.end().unwrap();
+
+        let mut tx = ServerTx::begin(&mut db).unwrap();
+        for size in [160, 125] {
+            doc_meta.set_hmac_and_size(Some([5; 32]), Some(size));
+            tx.metas
+                .insert(
+                    document,
+                    doc_meta
+                        .clone()
+                        .sign_with(&account)
+                        .unwrap()
+                        .add_time(created + 2),
+                )
+                .unwrap();
+        }
+        tx.end().unwrap();
+
+        folder_meta.set_deleted(true);
+        let mut tx = ServerTx::begin(&mut db).unwrap();
+        tx.metas
+            .insert(
+                folder,
+                folder_meta
+                    .clone()
+                    .sign_with(&account)
+                    .unwrap()
+                    .add_time(created + 3),
+            )
+            .unwrap();
+        tx.end().unwrap();
+
+        doc_meta.set_hmac_and_size(Some([6; 32]), Some(300));
+        let mut tx = ServerTx::begin(&mut db).unwrap();
+        tx.metas
+            .insert(document, doc_meta.sign_with(&account).unwrap().add_time(created + 4))
+            .unwrap();
+        tx.end().unwrap();
+
+        folder_meta.set_deleted(false);
+        let mut tx = ServerTx::begin(&mut db).unwrap();
+        tx.metas
+            .insert(
+                folder,
+                folder_meta
+                    .sign_with(&account)
+                    .unwrap()
+                    .add_time(created + 5),
+            )
+            .unwrap();
+        tx.end().unwrap();
+
+        let history = local(source.path(), |_| {}).unwrap();
+        for (seq, expected) in [
+            (2, 3 * METADATA_FEE + 100),
+            (3, 3 * METADATA_FEE + 125),
+            (4, METADATA_FEE),
+            (5, METADATA_FEE),
+            (6, 3 * METADATA_FEE + 300),
+        ] {
+            assert_eq!(history.checkpoint(seq).unwrap().storage, expected, "sequence {seq}");
+        }
     }
 
     #[test]
@@ -694,7 +830,7 @@ mod tests {
         db.snapshot().unwrap();
         activity(&mut db, owner, stamp + 20_000);
         fs::remove_file(source.path().join("db.1.log")).unwrap();
-        let history = local(source.path()).unwrap();
+        let history = local(source.path(), |_| {}).unwrap();
         assert_eq!(history.gaps, [(1, 2)]);
         assert_eq!(history.latest, 3);
         assert_eq!(history.accounts[0].activity.len(), 1);

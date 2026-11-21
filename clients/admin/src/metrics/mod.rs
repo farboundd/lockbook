@@ -58,10 +58,7 @@ fn write_cache(directory: &Path, history: History) -> Result<History> {
         .take()?
         .ok_or("metrics cache lost the imported history")?;
     drop(db);
-    let mut published = tempfile::NamedTempFile::new_in(&view)?;
-    std::io::copy(&mut std::fs::File::open(staging.path().join("db.0.log"))?, &mut published)?;
-    published.as_file().sync_all()?;
-    published.persist(view.join("db.0.log"))?;
+    std::fs::rename(staging.path().join("db.0.log"), view.join("db.0.log"))?;
     Ok(history)
 }
 

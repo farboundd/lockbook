@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::io::{self, Read, Seek};
+use std::io::{self, Read};
 
 pub const DAY: i64 = 86_400_000;
 pub const HOUR: i64 = 3_600_000;
@@ -62,13 +62,12 @@ pub fn decode<'a, T: Deserialize<'a>>(bytes: &'a [u8]) -> Result<T> {
 }
 
 pub enum Frame {
-    Complete(Vec<u8>),
+    Complete(usize),
     End,
     Partial,
 }
 
-pub fn read_frame(reader: &mut (impl Read + Seek), end: u64) -> Result<Frame> {
-    let remaining = end.saturating_sub(reader.stream_position()?);
+pub fn read_frame(reader: &mut impl Read, remaining: u64, bytes: &mut Vec<u8>) -> Result<Frame> {
     if remaining == 0 {
         return Ok(Frame::End);
     }
@@ -82,11 +81,12 @@ pub fn read_frame(reader: &mut (impl Read + Seek), end: u64) -> Result<Frame> {
         return Ok(Frame::Partial);
     }
     let size = usize::try_from(size)?;
-    let mut bytes = Vec::new();
-    bytes.try_reserve_exact(size)?;
-    bytes.resize(size, 0);
-    reader.read_exact(&mut bytes)?;
-    Ok(Frame::Complete(bytes))
+    if size > bytes.len() {
+        bytes.try_reserve_exact(size - bytes.len())?;
+        bytes.resize(size, 0);
+    }
+    reader.read_exact(&mut bytes[..size])?;
+    Ok(Frame::Complete(size))
 }
 
 fn frames(mut bytes: &[u8], mut f: impl FnMut(&[u8]) -> Result<()>) -> Result<()> {
@@ -317,6 +317,7 @@ struct Changes {
     full: HashSet<Owner>,
     scalar: HashSet<Owner>,
     files: HashSet<Uuid>,
+    file_size_deltas: HashMap<Uuid, (Owner, i128)>,
     owners_reset: bool,
     root_events: HashMap<Owner, i64>,
     activity: HashMap<Owner, i64>,
@@ -337,6 +338,7 @@ pub struct Replay {
     db: ServerV6,
     users: HashMap<Owner, usize>,
     checkpoint: Checkpoint,
+    counted_files: HashMap<Owner, HashSet<Uuid>>,
 }
 
 impl Replay {
@@ -374,8 +376,11 @@ impl Replay {
         if baseline {
             self.db = ServerV6::default();
         }
-        let mut changes =
-            Changes { owners_reset: baseline, server_egress: baseline, ..Default::default() };
+        let mut changes = Changes {
+            owners_reset: baseline || seq == 1,
+            server_egress: baseline,
+            ..Default::default()
+        };
         // The order is the persisted ServerV6 Schema order. Skip tables that do
         // not contribute to metrics before they are decoded by db-rs.
         frames(payload, |bytes| {
@@ -389,10 +394,7 @@ impl Replay {
                         changes.owners_reset = true;
                         return;
                     };
-                    self.file_owners(key, &mut changes.full);
-                    changes.files.insert(key);
-                    if let Some(meta) = value {
-                        changes.full.insert(meta.owner());
+                    if let Some(meta) = value.as_ref() {
                         if !baseline {
                             changes.hint(meta.version as i64);
                         }
@@ -401,6 +403,31 @@ impl Replay {
                                 .root_events
                                 .insert(meta.owner(), meta.file.timestamped_value.timestamp);
                         }
+                    }
+                    if changes.owners_reset {
+                        return;
+                    }
+                    // Content edits leave membership and deletion visibility unchanged.
+                    if let (Some(old), Some(new)) = (self.db.metas.get(&key), value.as_ref()) {
+                        if same_tree_metadata(old, new) {
+                            let owner = new.owner();
+                            if self
+                                .counted_files
+                                .get(&owner)
+                                .is_some_and(|files| files.contains(&key))
+                            {
+                                let delta = new.doc_size().unwrap_or(0) as i128
+                                    - old.doc_size().unwrap_or(0) as i128;
+                                changes.file_size_deltas.insert(key, (owner, delta));
+                            }
+                            return;
+                        }
+                    }
+                    changes.file_size_deltas.remove(&key);
+                    self.file_owners(key, &mut changes.full);
+                    changes.files.insert(key);
+                    if let Some(meta) = value {
+                        changes.full.insert(meta.owner());
                     }
                 })?,
                 5 => map_changes::<Owner, u64>(event.payload, |change| {
@@ -451,14 +478,16 @@ impl Replay {
                 .handle_events(event.last_modified.unwrap_or(seq), event.payload)?;
             Ok(())
         })?;
-        for file in changes.files {
-            self.file_owners(file, &mut changes.full);
-        }
         if changes.owners_reset {
+            self.counted_files.clear();
             changes
                 .full
                 .extend(self.db.accounts.iter().map(|(owner, _)| *owner));
             changes.full.extend(self.users.keys().copied());
+        } else {
+            for file in changes.files {
+                self.file_owners(file, &mut changes.full);
+            }
         }
         let initial_bulk_import = seq == 1
             && (changes.initial_bulk_import
@@ -489,6 +518,13 @@ impl Replay {
             let state = self.account_state(owner);
             self.record(owner, seq, state);
         }
+        let mut storage_deltas = HashMap::<Owner, i128>::new();
+        for (owner, delta) in changes.file_size_deltas.into_values() {
+            if delta != 0 && !changes.full.contains(&owner) {
+                *storage_deltas.entry(owner).or_default() += delta;
+                changes.scalar.insert(owner);
+            }
+        }
         for owner in changes.scalar.difference(&changes.full) {
             let state = self
                 .users
@@ -496,6 +532,9 @@ impl Replay {
                 .and_then(|index| self.history.accounts[*index].states.last())
                 .map(|(_, row)| row.clone());
             if let Some(mut state) = state {
+                if let (Some(storage), Some(delta)) = (state.storage, storage_deltas.get(owner)) {
+                    state.storage = Some(u64::try_from(i128::from(storage) + delta)?);
+                }
                 state.egress = self.egress(*owner);
                 self.record(*owner, seq, state);
             }
@@ -538,6 +577,8 @@ impl Replay {
     }
 
     fn account_state(&mut self, owner: Owner) -> AccountState {
+        let mut counted = self.counted_files.remove(&owner).unwrap_or_default();
+        counted.clear();
         let mut state = AccountState { egress: self.egress(owner), ..Default::default() };
         let Some(account) = self.db.accounts.get(&owner) else { return state };
         if account.billing_info.is_premium() {
@@ -572,7 +613,14 @@ impl Replay {
                     .iter()
                     .any(|file| file.owner() != owner || file.is_shared())
             });
-            state.storage = tree.calculate_usage(owner).ok();
+            state.storage = tree
+                .calculate_usage_with(owner, |id| {
+                    counted.insert(id);
+                })
+                .ok();
+            if state.storage.is_some() {
+                self.counted_files.insert(owner, counted);
+            }
         }
         state
     }
@@ -595,6 +643,16 @@ impl Replay {
         self.checkpoint.change(&state, true);
         self.user(owner).states.push((seq, state));
     }
+}
+
+fn same_tree_metadata(old: &ServerMeta, new: &ServerMeta) -> bool {
+    old.id() == new.id()
+        && old.owner() == new.owner()
+        && old.parent() == new.parent()
+        && old.attachments_of() == new.attachments_of()
+        && old.explicitly_deleted() == new.explicitly_deleted()
+        && old.file_type() == new.file_type()
+        && old.user_access_keys() == new.user_access_keys()
 }
 
 pub fn invalid(message: impl Into<String>) -> Error {

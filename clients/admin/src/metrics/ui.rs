@@ -171,17 +171,19 @@ impl Metrics {
         let path = PathBuf::from(&self.path);
         std::thread::spawn(move || {
             let mut transfer = Transfer::default();
+            let progress = |event| {
+                let _ = sender.send(Update::Progress(event));
+                ctx.request_repaint();
+            };
             let result = match job {
-                Job::Open => source::local(&path).map(Some),
+                Job::Open => source::local(&path, &progress).map(Some),
                 Job::Cached => read_cache(&directory),
-                Job::Refresh => source::refresh(&directory, &remote, |text| {
-                    let _ = sender.send(Update::Progress(text));
-                    ctx.request_repaint();
-                })
-                .map(|(history, bytes)| {
-                    transfer.bytes = Some(bytes);
-                    Some(history)
-                }),
+                Job::Refresh => {
+                    source::refresh(&directory, &remote, &progress).map(|(history, bytes)| {
+                        transfer.bytes = Some(bytes);
+                        Some(history)
+                    })
+                }
             };
             if job != Job::Open && matches!(&result, Ok(Some(_))) {
                 transfer.synced_at = cache_sync_time(&directory);
@@ -199,6 +201,9 @@ impl Metrics {
                 }
                 Update::Progress(RefreshProgress::Segments { complete, total }) => {
                     self.segments = Some((complete, total));
+                    if complete == total {
+                        self.progress = None;
+                    }
                 }
                 Update::Analysis(range, history, analysis) => {
                     if self.range == Some(range)
@@ -392,9 +397,11 @@ impl Metrics {
         {
             self.load(Job::Refresh, ctx);
         }
-        if let Some(progress) = &self.progress {
+        if self.busy {
             self.segment_progress(ui, 260.0);
-            ui.label(progress);
+            if let Some(progress) = &self.progress {
+                ui.label(progress);
+            }
         }
         if let Some(error) = &self.source_error {
             ui.colored_label(ui.visuals().error_fg_color, error);
@@ -431,10 +438,24 @@ impl Metrics {
         let Some((complete, total)) = self.segments.filter(|&(_, total)| total != 0) else {
             return false;
         };
-        let bar = egui::ProgressBar::new(complete as f32 / total as f32)
-            .desired_width(width)
-            .text(format!("{complete} of {total} segments · {} left", total - complete));
-        ui.add(bar);
+        let (track, _) = ui.allocate_exact_size(Vec2::new(width, 3.0), egui::Sense::hover());
+        ui.painter()
+            .rect_filled(track, 1.5, ui.visuals().widgets.noninteractive.bg_stroke.color);
+        if complete > 0 {
+            let filled = Rect::from_min_size(
+                track.min,
+                Vec2::new(track.width() * complete as f32 / total as f32, track.height()),
+            );
+            ui.painter()
+                .rect_filled(filled, 1.5, ui.visuals().selection.bg_fill);
+        }
+        ui.add_space(3.0);
+        let left = total - complete;
+        ui.label(match left {
+            0 => "Segment retrieval done".to_owned(),
+            1 => "1 segment left".to_owned(),
+            _ => format!("{left} segments left"),
+        });
         true
     }
 
@@ -442,7 +463,7 @@ impl Metrics {
         ui.painter()
             .rect_filled(ui.max_rect(), 0.0, ui.visuals().panel_fill);
         let ctx = ui.ctx().clone();
-        let angle = if self.busy && ui.style().animation_time > 0.0 {
+        let turn = if self.busy && ui.style().animation_time > 0.0 {
             let elapsed = self.loading_started.elapsed().as_secs_f32();
             let phase = (elapsed + LOGO_PAUSE_SECONDS - LOGO_TURN_SECONDS)
                 % (LOGO_PAUSE_SECONDS + LOGO_TURN_SECONDS);
@@ -452,7 +473,7 @@ impl Metrics {
             } else {
                 ctx.request_repaint_after(Duration::from_secs_f32(LOGO_PAUSE_SECONDS - phase));
             }
-            std::f32::consts::TAU * turn * turn * (3.0 - 2.0 * turn)
+            turn
         } else {
             0.0
         };
@@ -473,9 +494,22 @@ impl Metrics {
                         53.0,
                         Stroke::new(1.0, blue.gamma_multiply(0.26)),
                     );
-                    egui::Image::from_texture((self.logo.id(), Vec2::splat(size)))
-                        .rotate(angle, Vec2::splat(0.5))
-                        .paint_at(ui, Rect::from_center_size(center, Vec2::splat(size)));
+                    let logo = egui::Image::from_texture((self.logo.id(), Vec2::splat(size)));
+                    let logo_rect = Rect::from_center_size(center, Vec2::splat(size));
+                    let angle = logo_angle(turn);
+                    if turn > 0.0 {
+                        for (frames_ago, alpha) in [(4.0, 12), (3.0, 20), (2.0, 32), (1.0, 48)] {
+                            let earlier = (turn - frames_ago * 0.012 / LOGO_TURN_SECONDS).max(0.0);
+                            let trail = logo_angle(earlier);
+                            if angle - trail > 0.015 {
+                                logo.clone()
+                                    .rotate(trail, Vec2::splat(0.5))
+                                    .tint(Color32::from_white_alpha(alpha))
+                                    .paint_at(ui, logo_rect);
+                            }
+                        }
+                    }
+                    logo.rotate(angle, Vec2::splat(0.5)).paint_at(ui, logo_rect);
                     ui.add_space(16.0);
                     ui.label(
                         RichText::new("Lockbook Metrics Explorer")
@@ -483,11 +517,13 @@ impl Metrics {
                             .strong(),
                     );
                     ui.add_space(12.0);
-                    if let Some(progress) = &self.progress {
+                    if self.busy {
                         if !self.segment_progress(ui, 300.0) {
                             ui.add(egui::Spinner::new().size(23.0));
                         }
-                        ui.weak(progress);
+                        if let Some(progress) = &self.progress {
+                            ui.weak(progress);
+                        }
                     } else if let Some(error) = &self.source_error {
                         let title = if self.job == Job::Open {
                             "Couldn’t open local logs"
@@ -1039,6 +1075,10 @@ fn parse_date(value: &str) -> Option<i64> {
 
 fn current_time() -> i64 {
     OffsetDateTime::now_utc().unix_timestamp() * 1000
+}
+
+fn logo_angle(turn: f32) -> f32 {
+    std::f32::consts::TAU * turn * turn * (3.0 - 2.0 * turn)
 }
 
 fn preset_start(days: i64, end: i64) -> i64 {
