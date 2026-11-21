@@ -24,6 +24,7 @@ const TIME: &[time::format_description::BorrowedFormatItem<'static>] =
     format_description!("[year]-[month]-[day] [hour]:[minute] UTC");
 const CHART_MIN_WIDTH: f32 = 480.0;
 const CHART_GAP: f32 = 12.0;
+const CHART_HEADER_HEIGHT: f32 = 42.0;
 const STALE_AFTER_MS: i64 = 60 * 60 * 1000;
 const LOGO_TURN_SECONDS: f32 = 1.2;
 const LOGO_PAUSE_SECONDS: f32 = 4.8;
@@ -1050,13 +1051,10 @@ fn chart_grid(
     ui.scope(|ui| {
         ui.spacing_mut().item_spacing.x = CHART_GAP;
         for row in charts.chunks(columns) {
-            let align_headers = row.len() > 1 && row.iter().any(|chart| chart.series.len() > 1);
             ui.columns(columns, |cells| {
                 for (cell, chart) in cells.iter_mut().zip(row) {
                     let selection = surface(cell)
-                        .show(cell, |ui| {
-                            chart_content(ui, range, selected, chart, cursor_group, align_headers)
-                        })
+                        .show(cell, |ui| chart_content(ui, range, selected, chart, cursor_group))
                         .inner;
                     clicked = selection.or(clicked);
                 }
@@ -1069,7 +1067,7 @@ fn chart_grid(
 
 fn chart_content(
     ui: &mut Ui, (start, end): (i64, i64), selected: Option<i64>, chart: &Chart,
-    cursor_group: egui::Id, align_header: bool,
+    cursor_group: egui::Id,
 ) -> Option<i64> {
     let Chart { title, unit, series } = chart;
     let compact = ui.available_width() < 260.0;
@@ -1093,19 +1091,20 @@ fn chart_content(
     let tick_color = visuals.weak_text_color();
     let cursor_color = visuals.selection.stroke.color;
 
-    ui.vertical(|ui| {
-        ui.label(bold_text(*title, 17.0));
-        if series.len() > 1 {
-            ui.horizontal_wrapped(|ui| {
-                for ((label, _), color) in series.iter().zip(colors) {
-                    ui.colored_label(color, *label);
-                }
-            });
-        }
-        if align_header {
-            ui.set_min_height(42.0);
-        }
-    });
+    let (header_rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), CHART_HEADER_HEIGHT),
+        egui::Sense::hover(),
+    );
+    let mut header = ui.new_child(egui::UiBuilder::new().max_rect(header_rect));
+    header.set_clip_rect(ui.clip_rect().intersect(header_rect));
+    header.add(egui::Label::new(bold_text(*title, 17.0)).truncate());
+    if series.len() > 1 {
+        header.horizontal(|ui| {
+            for ((label, _), color) in series.iter().zip(colors) {
+                ui.add(egui::Label::new(RichText::new(*label).color(color)).truncate());
+            }
+        });
+    }
 
     let axis = YAxis::new(
         *unit,
@@ -1331,18 +1330,23 @@ mod tests {
         let ctx = Context::default();
         re_ui::apply_style_and_install_loaders(&ctx);
         workspace_rs::install_egui_fonts(&ctx);
-        let charts = ["Users", "Sharing", "Premium"].map(|title| Chart {
+        let mut charts = ["Users", "Sharing", "Premium"].map(|title| Chart {
             title,
             unit: Unit::Count,
             series: vec![(title, vec![(0, Some(1.0)), (DAY, Some(2.0))])],
         });
+        charts[0]
+            .series
+            .push(("Active", vec![(0, Some(1.0)), (DAY, Some(1.0))]));
         let draw = |width| {
             let mut ids = None;
             let input = egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(width, 760.0))),
                 ..Default::default()
             };
-            ctx.run_ui(input, |ui| {
+            let mut card_fill = Color32::TRANSPARENT;
+            let output = ctx.run_ui(input, |ui| {
+                card_fill = surface(ui).fill;
                 Frame::new()
                     .inner_margin(egui::Margin::symmetric(20, 0))
                     .show(ui, |ui| {
@@ -1354,8 +1358,24 @@ mod tests {
                         );
                         chart_grid(ui, (0, DAY), None, &charts);
                     });
-            })
-            .drop_without_applying_deltas();
+            });
+            let card_heights: Vec<_> = output
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::Shape::Rect(shape) if shape.fill == card_fill => {
+                        Some(shape.rect.height())
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(card_heights.len(), charts.len());
+            assert!(
+                card_heights
+                    .iter()
+                    .all(|height| (*height - card_heights[0]).abs() < 0.1)
+            );
+            output.drop_without_applying_deltas();
             let ids = ids.unwrap();
             let frames = ids.map(|id| {
                 *egui_plot::PlotMemory::load(&ctx, id)
