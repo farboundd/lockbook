@@ -140,11 +140,21 @@ version = "26.11.13"
 dependencies = [
  "base64 0.13.1",
  "basic-human-duration",
+ "bincode 2.0.1",
  "cli-rs",
+ "db-rs 0.4.4",
  "dialoguer",
+ "eframe",
+ "flate2",
  "lb-rs",
  "libsecp256k1",
+ "lockbook-server",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
  "time",
+ "workspace",
 ]
 
 [[package]]

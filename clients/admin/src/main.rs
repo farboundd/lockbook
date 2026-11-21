@@ -1,10 +1,11 @@
 mod account;
 mod disappear;
 mod info;
+mod metrics;
 mod validate;
 
 use cli_rs::arg::Arg;
-use cli_rs::cli_error::{CliResult, Exit};
+use cli_rs::cli_error::{CliError, CliResult, Exit};
 use cli_rs::command::Command;
 use cli_rs::flag::Flag;
 use cli_rs::parser::Cmd;
@@ -19,6 +20,19 @@ fn main() {
     Command::name("admin")
         .description("Lockbook server administration, as the admin account the CLI is signed in to.")
         .with_completions()
+        .subcommand(
+            Command::name("metrics")
+                .description("Browse historical metrics from a local or production server index log")
+                .input(Flag::<String>::new("logs").description("Path to a local ServerV6 directory"))
+                .input(Flag::<String>::new("remote-logs").description("Production ServerV6 directory (default: /lb-data/ServerV6)"))
+                .handler(|logs, remote_logs| {
+                    metrics::run(
+                        logs.value.clone().map(Into::into),
+                        remote_logs.value.clone().unwrap_or_else(|| "/lb-data/ServerV6".into()),
+                    )
+                    .map_err(|error| CliError::from(error.to_string()))
+                }),
+        )
         .subcommand(
             Command::name("disappear-account")
                 .description("Disappear a user, freeing up their username")
