@@ -4,8 +4,12 @@ use super::queries::{self, Cohort, Retention, SeriesPoint};
 use super::source::RefreshProgress;
 use super::{Result, cache_sync_time, format_bytes, read_cache, source};
 use eframe::egui::{
-    self, Align2, Color32, Context, FontId, Frame, Pos2, Rect, RichText, Stroke, Ui, Vec2,
+    self, Align2, Color32, Context, FontId, Frame, Rect, RichText, Stroke, Ui, Vec2,
 };
+use egui_plot::{
+    AxisHints, GridMark, HoverPosition, Line as PlotLine, Plot, PlotBounds, Points, VLine,
+};
+use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
@@ -21,12 +25,6 @@ const TIME: &[time::format_description::BorrowedFormatItem<'static>] =
 const STALE_AFTER_MS: i64 = 60 * 60 * 1000;
 const LOGO_TURN_SECONDS: f32 = 1.2;
 const LOGO_PAUSE_SECONDS: f32 = 4.8;
-const COLORS: [Color32; 4] = [
-    Color32::from_rgb(90, 125, 241),
-    Color32::from_rgb(33, 155, 128),
-    Color32::from_rgb(196, 118, 62),
-    Color32::from_rgb(163, 109, 208),
-];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
@@ -298,14 +296,22 @@ impl Metrics {
     fn controls(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
         ui.vertical_centered(|ui| {
-            Frame::window(ui.style()).inner_margin(egui::Margin::symmetric(7, 4)).show(ui, |ui| {
+            floating_frame(ui).inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
-                    for (tab, label) in [(Tab::Overview, "Overview"), (Tab::Retention, "Retention"), (Tab::Accounts, "Accounts")] {
-                        if ui.selectable_label(self.tab == tab, label).clicked() { self.tab = tab; }
-                    }
+                    ui.scope(|ui| {
+                        ui.set_max_width(244.0);
+                        re_ui::TabBar::new(ui)
+                            .selectable_value(&mut self.tab, Tab::Overview, "Overview")
+                            .selectable_value(&mut self.tab, Tab::Retention, "Retention")
+                            .selectable_value(&mut self.tab, Tab::Accounts, "Accounts");
+                    });
                     ui.separator();
-                    let label = self.range.map_or_else(|| "Date range".into(), |(start, end)| {
-                        if date(start) == date(end) { date(start) } else { format!("{} – {}", date(start), date(end)) }
+                    let label = self.range.map_or_else(|| "Date range".into(), |range| {
+                        let now = current_time();
+                        ctx.request_repaint_after(Duration::from_millis(
+                            (queries::day(now) + DAY - now) as u64,
+                        ));
+                        range_label(range, now)
                     });
                     let range_button = Button::default().text(&label).show(ui);
                     egui::Popup::menu(&range_button).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
@@ -344,13 +350,35 @@ impl Metrics {
                             ui.label("Import logs with dated events to select a range.");
                         }
                     });
-                    let source = Button::default().icon(&Icon::SYNC.size(16.0)).text("Source").show(ui);
-                    egui::Popup::menu(&source).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
-                        self.source_panel(ui, &ctx);
-                    });
                 });
             });
         });
+    }
+
+    fn source_button(&mut self, ctx: &Context) -> f32 {
+        egui::Area::new(egui::Id::unique("metrics source"))
+            .anchor(Align2::RIGHT_BOTTOM, [-20.0, -18.0])
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                floating_frame(ui).inner_margin(5.0).show(ui, |ui| {
+                    let source = Button::default()
+                        .icon(&Icon::SYNC.size(14.0))
+                        .text("Source")
+                        .show(ui);
+                    egui::Popup::menu(&source)
+                        .align(egui::RectAlign::TOP_END)
+                        .gap(8.0)
+                        .frame(floating_frame(ui))
+                        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                        .show(|ui| {
+                            ui.set_max_width(360.0);
+                            self.source_panel(ui, ctx);
+                        });
+                });
+            })
+            .response
+            .rect
+            .height()
     }
 
     fn source_panel(&mut self, ui: &mut Ui, ctx: &Context) {
@@ -598,17 +626,27 @@ impl Metrics {
     fn overview(&mut self, ui: &mut Ui, history: &History) {
         if let Some((seq, _)) = self.selected(history) {
             if let Some(state) = history.checkpoint(seq) {
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(format!("{} users", state.users));
-                    ui.separator();
-                    ui.label(format!("{} metadata entries", state.files));
-                    ui.separator();
-                    ui.label(if state.unknown_storage == 0 {
-                        format_bytes(state.storage)
-                    } else {
-                        "Storage unavailable".into()
+                let storage = if state.unknown_storage == 0 {
+                    format_bytes(state.storage)
+                } else {
+                    "–".into()
+                };
+                surface(ui).show(ui, |ui| {
+                    ui.columns(3, |columns| {
+                        for (column, (label, value)) in columns.iter_mut().zip([
+                            ("Users", state.users.to_string()),
+                            ("Metadata entries", state.files.to_string()),
+                            ("Document storage", storage),
+                        ]) {
+                            column.weak(label);
+                            column.label(bold_text(value, 24.0));
+                        }
                     });
+                    if state.unknown_storage != 0 {
+                        ui.weak("Storage unavailable");
+                    }
                 });
+                ui.add_space(12.0);
             }
         }
         let Some(analysis) = &self.query else { return };
@@ -666,9 +704,13 @@ impl Metrics {
     fn retention(&mut self, ui: &mut Ui) {
         let Some(analysis) = &self.query else { return };
         let range = self.range.unwrap();
-        ui.horizontal_wrapped(|ui| {
-            for (index, state) in analysis.retention.headline.into_iter().enumerate() {
-                ui.vertical(|ui| {
+        surface(ui).show(ui, |ui| {
+            ui.columns(4, |columns| {
+                for (index, (ui, state)) in columns
+                    .iter_mut()
+                    .zip(analysis.retention.headline)
+                    .enumerate()
+                {
                     let label = if index == 0 {
                         if date(range.1) == date(current_time()) {
                             "Today · Day 0".to_owned()
@@ -678,14 +720,13 @@ impl Metrics {
                     } else {
                         format!("Day {}", queries::RETENTION[index])
                     };
-                    ui.label(label);
+                    ui.weak(label);
                     match state {
                         Cohort::Complete(count) | Cohort::Partial(count) => {
-                            ui.heading(
-                                count
-                                    .percent()
-                                    .map_or_else(|| "–".to_owned(), |value| format!("{value:.1}%")),
-                            );
+                            let value = count
+                                .percent()
+                                .map_or_else(|| "–".into(), |value| format!("{value:.1}%"));
+                            ui.label(bold_text(value, 24.0));
                             ui.weak(format!(
                                 "{} of {} accounts{}",
                                 count.returned,
@@ -704,18 +745,18 @@ impl Metrics {
                             }
                         }
                         Cohort::Pending => {
+                            ui.label(bold_text("–", 24.0));
                             ui.weak("Not yet observable");
                         }
                         Cohort::Missing => {
+                            ui.label(bold_text("–", 24.0));
                             ui.weak("Missing coverage");
                         }
                     }
-                });
-                if index != 3 {
-                    ui.separator();
                 }
-            }
+            });
         });
+        ui.add_space(12.0);
         let series: Vec<_> = ["Day 0", "Day 7", "Day 14", "Day 30"]
             .into_iter()
             .enumerate()
@@ -757,7 +798,7 @@ impl Metrics {
         });
         if let Some(index) = self.selected_account {
             let account = &history.accounts[index];
-            ui.heading(account.display_name().as_ref());
+            ui.label(bold_text(account.display_name().as_ref(), 22.0));
             if let Some(created) = account.created {
                 ui.weak(format!("Created {}", date(created)));
             }
@@ -909,25 +950,46 @@ impl eframe::App for Metrics {
             self.onboarding(ui);
             return;
         };
+        let tokens = re_ui::design_tokens_of_visuals(ui.visuals());
+        let background = if ui.visuals().dark_mode {
+            tokens.viewport_background
+        } else {
+            tokens
+                .viewport_background
+                .lerp_to_gamma(tokens.strong_fg_color, 0.055)
+        };
+        ui.painter().rect_filled(ui.max_rect(), 0.0, background);
         let available_width = ui.available_width();
         let toolbar = egui::Area::new(egui::Id::unique("metrics toolbar"))
             .anchor(Align2::CENTER_TOP, [0.0, 16.0])
             .order(egui::Order::Foreground)
             .show(ui.ctx(), |ui| {
-                ui.set_max_width((available_width - 36.0).min(730.0));
+                ui.set_max_width((available_width - 36.0).min(560.0));
                 self.controls(ui);
             });
+        let source_height = self.source_button(ui.ctx());
         Frame::new()
-            .inner_margin(egui::Margin::same(20))
+            .inner_margin(egui::Margin {
+                left: 20,
+                right: 20,
+                top: 20,
+                bottom: (source_height.ceil() as i8).saturating_add(24),
+            })
             .show(ui, |ui| {
                 ui.add_space(toolbar.response.rect.height() + 12.0);
+                let title = match self.tab {
+                    Tab::Overview => "Overview",
+                    Tab::Retention => "Retention",
+                    Tab::Accounts => "Accounts",
+                };
+                ui.label(bold_text(title, 30.0));
                 self.state_control(ui, &history);
-                ui.add_space(8.0);
+                ui.add_space(12.0);
                 if self.query.is_none() && self.range.is_some() {
                     ui.spinner();
                 }
                 if self.tab == Tab::Accounts && self.selected_account.is_none() {
-                    self.accounts(ui, &history);
+                    surface(ui).show(ui, |ui| self.accounts(ui, &history));
                     return;
                 }
                 egui::ScrollArea::vertical()
@@ -941,6 +1003,26 @@ impl eframe::App for Metrics {
     }
 }
 
+fn bold_text(text: impl Into<String>, size: f32) -> RichText {
+    RichText::new(text).font(FontId::new(size, egui::FontFamily::Name(Arc::from("Bold"))))
+}
+
+fn surface(ui: &Ui) -> Frame {
+    let tokens = re_ui::design_tokens_of_visuals(ui.visuals());
+    Frame::new()
+        .fill(tokens.notification_panel_background_color)
+        .stroke(Stroke::new(
+            tokens.divider_stroke.width,
+            tokens.divider_stroke.color.gamma_multiply(0.65),
+        ))
+        .corner_radius(ui.visuals().window_corner_radius)
+        .inner_margin(16.0)
+}
+
+fn floating_frame(ui: &Ui) -> Frame {
+    re_ui::design_tokens_of_visuals(ui.visuals()).popup_frame(ui.style())
+}
+
 type Line = (&'static str, fn(&SeriesPoint) -> Option<f64>);
 type PlotSeries<'a> = (&'a str, Vec<(i64, Option<f64>)>);
 
@@ -948,120 +1030,215 @@ fn chart(
     ui: &mut Ui, title: &str, (start, end): (i64, i64), selected: Option<i64>, unit: Unit,
     series: &[PlotSeries<'_>],
 ) -> Option<i64> {
-    ui.label(RichText::new(title).strong());
+    let cursor_group = ui.scope_id().with("metrics time cursor");
+    let clicked = surface(ui)
+        .show(ui, |ui| chart_content(ui, title, (start, end), selected, unit, series, cursor_group))
+        .inner;
+    ui.add_space(12.0);
+    clicked
+}
+
+fn chart_content(
+    ui: &mut Ui, title: &str, (start, end): (i64, i64), selected: Option<i64>, unit: Unit,
+    series: &[PlotSeries<'_>], cursor_group: egui::Id,
+) -> Option<i64> {
+    let visuals = ui.visuals();
+    let tokens = re_ui::design_tokens_of_visuals(visuals);
+    let colors = if visuals.dark_mode {
+        [
+            Color32::from_rgb(128, 163, 253),
+            Color32::from_rgb(83, 203, 175),
+            Color32::from_rgb(247, 173, 113),
+            Color32::from_rgb(196, 149, 245),
+        ]
+    } else {
+        [
+            Color32::from_rgb(52, 91, 193),
+            Color32::from_rgb(15, 123, 99),
+            Color32::from_rgb(164, 85, 33),
+            Color32::from_rgb(127, 73, 172),
+        ]
+    };
+    let tick_color = visuals.weak_text_color();
+    let cursor_color = visuals.selection.stroke.color;
+
+    ui.label(bold_text(title, 17.0));
     if series.len() > 1 {
         ui.horizontal_wrapped(|ui| {
-            for (index, (label, _)) in series.iter().enumerate() {
-                ui.colored_label(COLORS[index], *label);
+            for ((label, _), color) in series.iter().zip(colors) {
+                ui.colored_label(color, *label);
             }
         });
     }
-    let (response, painter) =
-        ui.allocate_painter(Vec2::new(ui.available_width(), 138.0), egui::Sense::click());
+
     let axis = YAxis::new(
         unit,
         series
             .iter()
             .flat_map(|(_, values)| values.iter().filter_map(|(_, value)| *value)),
     );
-    let tick_font = FontId::proportional(11.0);
-    let tick_color = ui.visuals().weak_text_color();
-    let ticks: Vec<_> = axis
-        .ticks()
-        .map(|(value, label)| {
-            let text = painter.layout_no_wrap(label, tick_font.clone(), tick_color);
-            (value, text)
+    let [bottom, top] = axis.bounds();
+    let span = end - start;
+    let (left, right) = if span == 0 { (start - 60_000, end + 60_000) } else { (start, end) };
+    let x_axis = AxisHints::new_x()
+        .tick_label_font(FontId::proportional(11.0))
+        .tick_label_color(tick_color)
+        .formatter(move |tick, _| {
+            let format = match span {
+                0..240_000 => format_description!("[hour]:[minute]:[second]"),
+                240_000..DAY => format_description!("[hour]:[minute]"),
+                _ => DATE,
+            };
+            format_date(tick.value.round() as i64, format)
+        });
+    let y_axis = AxisHints::new_y()
+        .min_thickness(72.0)
+        .tick_label_font(FontId::proportional(11.0))
+        .tick_label_color(tick_color)
+        .formatter(|tick, _| axis.label(tick.value));
+
+    let plot = Plot::new(title)
+        .height(154.0)
+        .custom_x_axes(vec![x_axis])
+        .custom_y_axes(vec![y_axis])
+        .show_background(false)
+        .show_grid([false, true])
+        .grid_color(tokens.divider_stroke.color)
+        .x_grid_spacer(move |_| time_grid(start, end))
+        .y_grid_spacer(|_| {
+            axis.values()
+                .map(|value| GridMark { value, step_size: axis.step_size() })
+                .collect()
         })
-        .collect();
-    let label_width = ticks
-        .iter()
-        .map(|(_, text)| text.size().x)
-        .fold(0.0_f32, f32::max);
-    let rect = Rect::from_min_max(
-        response.rect.min + Vec2::new(label_width.max(62.0) + 13.0, 11.0),
-        response.rect.max - Vec2::new(16.0, 24.0),
-    );
-    let span = (end - start).max(1) as f64;
-    let x = |time: i64| rect.left() + ((time - start) as f64 / span) as f32 * rect.width();
-    let y = |value: f64| rect.bottom() - axis.fraction(value) as f32 * rect.height();
-    for (value, text) in ticks {
-        let y = y(value);
-        painter.hline(rect.x_range(), y, ui.visuals().widgets.noninteractive.bg_stroke);
-        painter.galley(
-            Pos2::new(rect.left() - 8.0 - text.size().x, y - text.size().y / 2.0),
-            text,
-            tick_color,
-        );
-    }
-    for (time, align) in [(start, Align2::LEFT_TOP), (end, Align2::RIGHT_TOP)] {
-        if start == end && align == Align2::RIGHT_TOP {
-            continue;
-        }
-        painter.text(
-            Pos2::new(
-                if align == Align2::RIGHT_TOP { rect.right() } else { rect.left() },
-                rect.bottom() + 4.0,
-            ),
-            align,
-            date(time),
-            FontId::proportional(11.0),
-            ui.visuals().weak_text_color(),
-        );
-    }
-    for (index, (_, values)) in series.iter().enumerate() {
-        let mut prior = None;
-        for (time, value) in values {
-            let point = value
-                .filter(|value| value.is_finite())
-                .map(|value| Pos2::new(x(*time), y(value)));
-            if let Some(point) = point {
-                if let Some(prior) = prior {
-                    painter.line_segment([prior, point], Stroke::new(1.5, COLORS[index]));
-                } else {
-                    painter.circle_filled(point, 2.0, COLORS[index]);
+        .show_y(false)
+        .cursor_color(tick_color)
+        .link_cursor(cursor_group, [true, false])
+        .allow_zoom(false)
+        .allow_drag(false)
+        .allow_scroll(false)
+        .allow_boxed_zoom(false)
+        .allow_double_click_reset(false)
+        .allow_axis_zoom_drag(false)
+        .sense(egui::Sense::click())
+        .label_formatter(|hover| {
+            let HoverPosition::Elsewhere { position } = hover else { return None };
+            let time = position.x.round() as i64;
+            let mut label = String::new();
+            let mut has_value = false;
+            for (name, points) in series {
+                let Some((stamp, value)) = nearest_sample(points, time) else { continue };
+                if label.is_empty() {
+                    label = timestamp(stamp);
                 }
-            }
-            prior = point;
-        }
-    }
-    if let Some(time) = selected.filter(|time| (start..=end).contains(time)) {
-        painter.vline(x(time), rect.y_range(), Stroke::new(1.0, ui.visuals().weak_text_color()));
-    }
-    let pointer = response
-        .hover_pos()
-        .or(response.interact_pointer_pos())
-        .filter(|pos| rect.contains(*pos));
-    let mut closest_time = None;
-    if let Some(pointer) = pointer {
-        let time = start + (((pointer.x - rect.left()) / rect.width()) as f64 * span) as i64;
-        let mut values = Vec::new();
-        for (index, (name, points)) in series.iter().enumerate() {
-            if let Some(&(stamp, value)) =
-                points.iter().min_by_key(|(stamp, _)| stamp.abs_diff(time))
-            {
-                closest_time.get_or_insert(stamp);
                 if let Some(value) = value.filter(|value| value.is_finite()) {
-                    painter.circle_filled(Pos2::new(x(stamp), y(value)), 3.0, COLORS[index]);
-                    values.push((*name, unit.label(value)));
+                    has_value = true;
+                    let _ = write!(label, "\n{name} · {}", unit.label(value));
                 }
             }
-        }
-        egui::Tooltip::for_widget(&response)
-            .at_pointer()
-            .show(|ui| {
-                if let Some(stamp) = closest_time {
-                    ui.label(timestamp(stamp));
+            if !has_value {
+                if !label.is_empty() {
+                    label.push('\n');
                 }
-                for (name, value) in &values {
-                    ui.label(format!("{name} · {value}"));
+                label.push_str("Missing coverage");
+            }
+            Some(label)
+        })
+        .show(ui, |plot| {
+            plot.set_plot_bounds(PlotBounds::from_min_max(
+                [left as f64, bottom],
+                [right as f64, top],
+            ));
+            for ((name, values), color) in series.iter().zip(colors) {
+                for segment in values.split(|(_, value)| value.is_none_or(|v| !v.is_finite())) {
+                    match segment {
+                        [] => {}
+                        [(stamp, Some(value))] => plot.points(
+                            Points::new(*name, [*stamp as f64, *value])
+                                .color(color)
+                                .radius(2.5)
+                                .allow_hover(false),
+                        ),
+                        _ => {
+                            let points: Vec<_> = segment
+                                .iter()
+                                .filter_map(|(stamp, value)| {
+                                    value.map(|value| [*stamp as f64, value])
+                                })
+                                .collect();
+                            plot.line(
+                                PlotLine::new(*name, points)
+                                    .color(color)
+                                    .width(1.8)
+                                    .allow_hover(false),
+                            );
+                        }
+                    }
                 }
-                if values.is_empty() {
-                    ui.weak("Missing coverage");
-                }
-            });
+            }
+            if let Some(time) = selected.filter(|time| (start..=end).contains(time)) {
+                plot.vline(
+                    VLine::new("Selected checkpoint", time as f64)
+                        .color(cursor_color)
+                        .allow_hover(false),
+                );
+            }
+        });
+
+    if !plot.response.clicked() {
+        return None;
     }
-    ui.add_space(11.0);
-    response.clicked().then_some(closest_time).flatten()
+    let pointer = plot.response.interact_pointer_pos()?;
+    let time = plot.transform.value_from_position(pointer).x.round() as i64;
+    series
+        .iter()
+        .find_map(|(_, points)| nearest_sample(points, time).map(|(stamp, _)| stamp))
+}
+
+fn time_grid(start: i64, end: i64) -> Vec<GridMark> {
+    let span = end - start;
+    let minimum_step = if span >= DAY { DAY } else { 1_000 };
+    let target_step = (span / 4).max(minimum_step);
+    let step = [
+        1_000,
+        5_000,
+        15_000,
+        60_000,
+        5 * 60_000,
+        15 * 60_000,
+        DAY / 24,
+        DAY / 8,
+        DAY / 4,
+        DAY / 2,
+        DAY,
+    ]
+    .into_iter()
+    .find(|&step| step >= target_step)
+    .unwrap_or_else(|| ((target_step + DAY - 1) / DAY) * DAY);
+    let first = start + (step - start.rem_euclid(step)) % step;
+    if first > end {
+        return vec![GridMark { value: start as f64, step_size: step as f64 }];
+    }
+    (0..=(end - first) / step)
+        .map(|index| GridMark { value: (first + index * step) as f64, step_size: step as f64 })
+        .collect()
+}
+
+fn nearest_sample(points: &[(i64, Option<f64>)], time: i64) -> Option<(i64, Option<f64>)> {
+    points
+        .iter()
+        .min_by_key(|(stamp, _)| stamp.abs_diff(time))
+        .copied()
+}
+
+fn range_label((start, end): (i64, i64), now: i64) -> String {
+    let label = |time| {
+        if queries::day(time) == queries::day(now) { "Present".into() } else { date(time) }
+    };
+    if queries::day(start) == queries::day(end) {
+        label(end)
+    } else {
+        format!("{} – {}", label(start), label(end))
+    }
 }
 
 fn parse_date(value: &str) -> Option<i64> {
@@ -1094,4 +1271,54 @@ fn format_date(value: i64, format: &[time::format_description::BorrowedFormatIte
         .ok()
         .and_then(|date| date.format(format).ok())
         .unwrap_or_else(|| "Unknown date".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn labels_only_the_current_utc_day_as_present() {
+        let today = parse_date("2026-11-21").unwrap();
+        let yesterday = today - DAY;
+        let now = today + DAY / 2;
+        assert_eq!(range_label((yesterday, now), now), "2026-11-20 – Present");
+        assert_eq!(range_label((today, now), now), "Present");
+        assert_eq!(range_label((yesterday, today - 1), now), "2026-11-20");
+    }
+
+    #[test]
+    fn clicking_plot_picks_the_nearest_checkpoint_even_in_a_coverage_gap() {
+        let ctx = Context::default();
+        re_ui::apply_style_and_install_loaders(&ctx);
+        workspace_rs::install_egui_fonts(&ctx);
+        let start = 1_700_000_000_000;
+        let middle = start + DAY;
+        let end = middle + DAY;
+        let series = [("Users", vec![(start, Some(42.0)), (middle, None), (end, Some(45.0))])];
+        let pointer = egui::pos2(400.0, 75.0);
+        let mut selection = None;
+
+        let mut draw = |events| {
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(720.0, 240.0))),
+                events,
+                ..Default::default()
+            };
+            ctx.run_ui(input, |ui| {
+                selection = chart(ui, "Users", (start, end), None, Unit::Count, &series);
+            })
+            .drop_without_applying_deltas();
+        };
+        draw(vec![egui::Event::PointerMoved(pointer)]);
+        for pressed in [true, false] {
+            draw(vec![egui::Event::PointerButton {
+                pos: pointer,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            }]);
+        }
+        assert_eq!(selection, Some(middle));
+    }
 }

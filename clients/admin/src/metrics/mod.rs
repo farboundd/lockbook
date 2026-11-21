@@ -101,6 +101,8 @@ pub fn run(logs: Option<PathBuf>, remote: String) -> Result<()> {
                 .wgpu_render_state
                 .as_ref()
                 .ok_or("Lockbook Metrics requires a wgpu renderer")?;
+            // Install the theme first so the shared renderer can supply Lockbook's fonts.
+            re_ui::apply_style_and_install_loaders(&context.egui_ctx);
             workspace_rs::register_egui_renderer(
                 &context.egui_ctx,
                 &render_state.device,
@@ -109,7 +111,6 @@ pub fn run(logs: Option<PathBuf>, remote: String) -> Result<()> {
                 &mut render_state.renderer.write(),
                 u32::from(MSAA_SAMPLES),
             );
-            workspace_rs::theme::visuals::init(&context.egui_ctx);
             let logo = context
                 .egui_ctx
                 .load_texture("Lockbook logo", logo, Default::default());
