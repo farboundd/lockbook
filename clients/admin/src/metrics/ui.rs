@@ -22,7 +22,7 @@ const DATE: &[time::format_description::BorrowedFormatItem<'static>] =
     format_description!("[year]-[month]-[day]");
 const TIME: &[time::format_description::BorrowedFormatItem<'static>] =
     format_description!("[year]-[month]-[day] [hour]:[minute] UTC");
-const CHART_MIN_WIDTH: f32 = 240.0;
+const CHART_MIN_WIDTH: f32 = 480.0;
 const CHART_GAP: f32 = 12.0;
 const STALE_AFTER_MS: i64 = 60 * 60 * 1000;
 const LOGO_TURN_SECONDS: f32 = 1.2;
@@ -1318,11 +1318,11 @@ mod tests {
     #[test]
     fn fits_chart_columns_with_room_for_gaps() {
         assert_eq!(chart_columns(200.0, 9), 1);
-        assert_eq!(chart_columns(491.0, 9), 1);
-        assert_eq!(chart_columns(492.0, 9), 2);
-        assert_eq!(chart_columns(744.0, 9), 3);
-        assert_eq!(chart_columns(996.0, 9), 4);
-        assert_eq!(chart_columns(1800.0, 3), 3);
+        assert_eq!(chart_columns(971.0, 9), 1);
+        assert_eq!(chart_columns(972.0, 9), 2);
+        assert_eq!(chart_columns(1464.0, 9), 3);
+        assert_eq!(chart_columns(1956.0, 9), 4);
+        assert_eq!(chart_columns(2200.0, 3), 3);
         assert_eq!(chart_columns(1800.0, 0), 0);
     }
 
@@ -1366,11 +1366,11 @@ mod tests {
             (ids, frames)
         };
 
-        let (wide_ids, [first, second, third]) = draw(560.0);
+        let (wide_ids, [first, second, third]) = draw(1100.0);
         assert_eq!(first.top(), second.top());
         assert!(first.right() < second.left());
         assert!(first.bottom() < third.top());
-        let (narrow_ids, [first, second, third]) = draw(490.0);
+        let (narrow_ids, [first, second, third]) = draw(560.0);
         assert_eq!(wide_ids, narrow_ids);
         assert_eq!(first.left(), second.left());
         assert!(first.bottom() < second.top() && second.bottom() < third.top());
