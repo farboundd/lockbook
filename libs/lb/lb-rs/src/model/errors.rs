@@ -64,14 +64,6 @@ impl Display for LbErrKind {
             LbErrKind::CannotCancelSubscriptionForAppStore => {
                 write!(f, "You cannot cancel an app store subscription from here")
             }
-            LbErrKind::CardDecline => write!(f, "Your card was declined"),
-            LbErrKind::CardExpired => write!(f, "Your card is expired"),
-            LbErrKind::CardInsufficientFunds => write!(f, "This card has insufficient funds"),
-            LbErrKind::CardInvalidCvc => write!(f, "Your CVC is invalid"),
-            LbErrKind::CardInvalidExpMonth => write!(f, "Your expiration month is invalid"),
-            LbErrKind::CardInvalidExpYear => write!(f, "Your expiration year is invalid"),
-            LbErrKind::CardInvalidNumber => write!(f, "Your card number is invalid"),
-            LbErrKind::CardNotSupported => write!(f, "That card is not supported by stripe"),
             LbErrKind::ClientUpdateRequired => {
                 write!(f, "You must update your Lockbook to do that")
             }
@@ -106,7 +98,6 @@ impl Display for LbErrKind {
             LbErrKind::UsageIsOverFreeTierDataCap => {
                 write!(f, "You're out of space, you can purchase additional space")
             }
-            LbErrKind::OldCardDoesNotExist => write!(f, "No existing card found"),
             LbErrKind::PathContainsEmptyFileName => {
                 write!(f, "That path contains an empty file name")
             }
@@ -304,14 +295,6 @@ pub enum LbErrKind {
     AlreadySyncing,
     // todo: group billing
     CannotCancelSubscriptionForAppStore,
-    CardDecline,
-    CardExpired,
-    CardInsufficientFunds,
-    CardInvalidCvc,
-    CardInvalidExpMonth,
-    CardInvalidExpYear,
-    CardInvalidNumber,
-    CardNotSupported,
     ClientUpdateRequired,
     CurrentUsageIsMoreThanNewTier,
     DiskPathInvalid,
@@ -337,7 +320,6 @@ pub enum LbErrKind {
     NotPremium,
     UsageIsOverDataCap,
     UsageIsOverFreeTierDataCap,
-    OldCardDoesNotExist,
     PathContainsEmptyFileName,
     RootModificationInvalid,
     RootNonexistent,
@@ -352,7 +334,7 @@ pub enum LbErrKind {
     UsernamePublicKeyMismatch,
     UsernameTaken,
     ReReadRequired,
-    /// An attachments folder moves only with its document and keeps its name
+    /// An attachments folder refuses moves and renames; move or rename its target instead
     AttachmentsFolderFixed,
     Diff(DiffError),
 
@@ -448,6 +430,49 @@ impl From<ApiError<api::NewAccountError>> for LbErr {
             ApiError::Endpoint(api::NewAccountError::UsernameTaken) => LbErrKind::UsernameTaken,
             ApiError::Endpoint(api::NewAccountError::InvalidUsername) => LbErrKind::UsernameInvalid,
             ApiError::Endpoint(api::NewAccountError::Disabled) => LbErrKind::ServerDisabled,
+            e => core_err_unexpected(e),
+        }
+        .into()
+    }
+}
+
+impl From<ApiError<api::NewSubAccountError>> for LbErr {
+    fn from(err: ApiError<api::NewSubAccountError>) -> Self {
+        use api::NewSubAccountError::*;
+        match err {
+            ApiError::SendFailed(_) => LbErrKind::ServerUnreachable,
+            ApiError::ClientUpdateRequired => LbErrKind::ClientUpdateRequired,
+            ApiError::Endpoint(UsernameTaken) => LbErrKind::UsernameTaken,
+            ApiError::Endpoint(InvalidUsername) => LbErrKind::UsernameInvalid,
+            ApiError::Endpoint(Disabled) => LbErrKind::ServerDisabled,
+            ApiError::Endpoint(NotPremium) => LbErrKind::NotPremium,
+            ApiError::Endpoint(NotPermissioned) => LbErrKind::InsufficientPermission,
+            ApiError::Endpoint(CounterIncorrect) => LbErrKind::TryAgain,
+            e => core_err_unexpected(e),
+        }
+        .into()
+    }
+}
+
+impl From<ApiError<api::ListSubAccountsError>> for LbErr {
+    fn from(err: ApiError<api::ListSubAccountsError>) -> Self {
+        match err {
+            ApiError::SendFailed(_) => LbErrKind::ServerUnreachable,
+            ApiError::ClientUpdateRequired => LbErrKind::ClientUpdateRequired,
+            e => core_err_unexpected(e),
+        }
+        .into()
+    }
+}
+
+impl From<ApiError<api::DeleteSubAccountError>> for LbErr {
+    fn from(err: ApiError<api::DeleteSubAccountError>) -> Self {
+        match err {
+            ApiError::SendFailed(_) => LbErrKind::ServerUnreachable,
+            ApiError::ClientUpdateRequired => LbErrKind::ClientUpdateRequired,
+            ApiError::Endpoint(api::DeleteSubAccountError::UserNotFound) => {
+                LbErrKind::UsernameNotFound
+            }
             e => core_err_unexpected(e),
         }
         .into()

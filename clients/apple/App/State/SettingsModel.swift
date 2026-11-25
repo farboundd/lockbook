@@ -11,6 +11,10 @@ import SwiftWorkspace
     }
 
     func loadTier() {
+        guard AppState.shared.account?.isSubAccount != true else {
+            return
+        }
+
         DispatchQueue.global(qos: .userInitiated).async {
             let res = AppState.lb.getSubscriptionInfo()
 
@@ -27,7 +31,7 @@ import SwiftWorkspace
 
     func loadUsages() {
         DispatchQueue.global(qos: .userInitiated).async {
-            let res = AppState.lb.getUsage()
+            let res = AppState.lb.refreshUsage()
 
             DispatchQueue.main.async {
                 switch res {

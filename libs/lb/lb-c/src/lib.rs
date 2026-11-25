@@ -17,10 +17,7 @@ use lb_rs::model::filename::NameComponents;
 use lb_rs::service::debug::DebugInfoDisplay;
 use lb_rs::service::events::Event;
 pub use lb_rs::*;
-use model::api::{
-    AppStoreAccountState, GooglePlayAccountState, PaymentMethod, PaymentPlatform,
-    StripeAccountTier, UnixTimeMillis,
-};
+use model::api::{AppStoreAccountState, GooglePlayAccountState, PaymentPlatform, UnixTimeMillis};
 use search::{ContentSearcher, PathSearcher};
 use service::import_export::ImportStatus;
 
@@ -242,6 +239,101 @@ pub extern "C" fn lb_export_account_qr(lb: *mut Lb) -> LbExportAccountQRRes {
             let err = lb_err(err);
             LbExportAccountQRRes { qr: null_mut(), qr_len: 0, err }
         }
+    }
+}
+
+#[repr(C)]
+pub struct LbCreateSubAccountRes {
+    err: *mut LbFfiErr,
+    username: *mut c_char,
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn lb_create_sub_account(
+    lb: *mut Lb, label: *const c_char,
+) -> LbCreateSubAccountRes {
+    let lb = rlb(lb);
+    let label = rstr(label);
+
+    match lb.create_sub_account(label) {
+        Ok(username) => LbCreateSubAccountRes { err: null_mut(), username: cstring(username) },
+        Err(err) => LbCreateSubAccountRes { err: lb_err(err), username: null_mut() },
+    }
+}
+
+#[repr(C)]
+pub struct LbSubAccount {
+    username: *mut c_char,
+    usage: u64,
+}
+
+#[repr(C)]
+pub struct LbSubAccountsRes {
+    err: *mut LbFfiErr,
+    sub_accounts: *mut LbSubAccount,
+    len: usize,
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn lb_list_sub_accounts(lb: *mut Lb) -> LbSubAccountsRes {
+    let lb = rlb(lb);
+
+    match lb.list_sub_accounts() {
+        Ok(sub_accounts) => {
+            let (sub_accounts, len) = carray(
+                sub_accounts
+                    .into_iter()
+                    .map(|sub_account| LbSubAccount {
+                        username: cstring(sub_account.username),
+                        usage: sub_account.usage,
+                    })
+                    .collect(),
+            );
+
+            LbSubAccountsRes { err: null_mut(), sub_accounts, len }
+        }
+        Err(err) => LbSubAccountsRes { err: lb_err(err), sub_accounts: null_mut(), len: 0 },
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn lb_delete_sub_account(lb: *mut Lb, username: *const c_char) -> *mut LbFfiErr {
+    let lb = rlb(lb);
+    let username = rstr(username);
+
+    match lb.delete_sub_account(username) {
+        Ok(()) => null_mut(),
+        Err(err) => lb_err(err),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn lb_export_sub_account_private_key(
+    lb: *mut Lb, username: *const c_char,
+) -> LbExportAccountRes {
+    let lb = rlb(lb);
+    let username = rstr(username);
+
+    match lb.export_sub_account_private_key(username) {
+        Ok(account_key) => {
+            LbExportAccountRes { account_string: cstring(account_key), err: null_mut() }
+        }
+        Err(err) => LbExportAccountRes { account_string: null_mut(), err: lb_err(err) },
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn lb_export_sub_account_phrase(
+    lb: *mut Lb, username: *const c_char,
+) -> LbExportAccountRes {
+    let lb = rlb(lb);
+    let username = rstr(username);
+
+    match lb.export_sub_account_phrase(username) {
+        Ok(account_phrase) => {
+            LbExportAccountRes { account_string: cstring(account_phrase), err: null_mut() }
+        }
+        Err(err) => LbExportAccountRes { account_string: null_mut(), err: lb_err(err) },
     }
 }
 
@@ -680,6 +772,18 @@ pub extern "C" fn lb_get_local_changes(lb: *mut Lb) -> LbIdListRes {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn lb_write_panic_to_file(
+    lb: *mut Lb, error_header: *const c_char, backtrace: *const c_char,
+) -> *mut LbFfiErr {
+    let lb = rlb(lb);
+
+    match lb.write_panic_to_file(rstring(error_header), rstring(backtrace)) {
+        Ok(_) => null_mut(),
+        Err(err) => lb_err(err),
+    }
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn lb_debug_info(lb: *mut Lb) -> *mut c_char {
     let lb = rlb(lb);
 
@@ -798,38 +902,116 @@ pub struct LbUsageMetricsRes {
 }
 
 #[repr(C)]
-pub struct LbUsageMetrics {
-    server_used_exact: u64,
-    server_used_human: *mut c_char,
+pub struct LbUsageItem {
+    exact: u64,
+    human: *mut c_char,
+}
 
-    server_cap_exact: u64,
-    server_cap_human: *mut c_char,
+#[repr(C)]
+pub struct LbUsageMetrics {
+    synced: LbUsageItem,
+    local: LbUsageItem,
+    added: LbUsageItem,
+    freed: LbUsageItem,
+    has_data_cap: bool,
+    data_cap: LbUsageItem,
+}
+
+impl LbUsageItem {
+    fn empty() -> Self {
+        Self { exact: 0, human: null_mut() }
+    }
+}
+
+impl From<service::usage::UsageItemMetric> for LbUsageItem {
+    fn from(metric: service::usage::UsageItemMetric) -> Self {
+        Self { exact: metric.exact, human: cstring(metric.readable) }
+    }
+}
+
+impl LbUsageMetrics {
+    fn empty() -> Self {
+        Self {
+            synced: LbUsageItem::empty(),
+            local: LbUsageItem::empty(),
+            added: LbUsageItem::empty(),
+            freed: LbUsageItem::empty(),
+            has_data_cap: false,
+            data_cap: LbUsageItem::empty(),
+        }
+    }
+}
+
+impl From<service::usage::UsageMetrics> for LbUsageMetrics {
+    fn from(usage: service::usage::UsageMetrics) -> Self {
+        Self {
+            synced: usage.synced.into(),
+            local: usage.local.into(),
+            added: usage.added.into(),
+            freed: usage.freed.into(),
+            has_data_cap: usage.data_cap.is_some(),
+            data_cap: usage
+                .data_cap
+                .map(LbUsageItem::from)
+                .unwrap_or_else(LbUsageItem::empty),
+        }
+    }
+}
+
+fn usage_res(res: model::errors::LbResult<service::usage::UsageMetrics>) -> LbUsageMetricsRes {
+    match res {
+        Ok(usage) => LbUsageMetricsRes { err: null_mut(), usages: usage.into() },
+        Err(err) => LbUsageMetricsRes { err: lb_err(err), usages: LbUsageMetrics::empty() },
+    }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn lb_get_usage(lb: *mut Lb) -> LbUsageMetricsRes {
-    let lb = rlb(lb);
+    usage_res(rlb(lb).get_usage())
+}
 
-    match lb.get_usage() {
-        Ok(usage) => LbUsageMetricsRes {
-            err: null_mut(),
-            usages: LbUsageMetrics {
-                server_used_exact: usage.server_usage.exact,
-                server_used_human: cstring(usage.server_usage.readable),
-                server_cap_exact: usage.data_cap.exact,
-                server_cap_human: cstring(usage.data_cap.readable),
-            },
-        },
-        Err(err) => LbUsageMetricsRes {
-            err: lb_err(err),
-            usages: LbUsageMetrics {
-                server_used_exact: 0,
-                server_used_human: null_mut(),
-                server_cap_exact: 0,
-                server_cap_human: null_mut(),
-            },
-        },
+#[unsafe(no_mangle)]
+pub extern "C" fn lb_refresh_usage(lb: *mut Lb) -> LbUsageMetricsRes {
+    usage_res(rlb(lb).refresh_usage())
+}
+
+#[repr(C)]
+pub struct LbUsageEntry {
+    id: LbUuid,
+    synced: u64,
+    local: u64,
+}
+
+#[repr(C)]
+pub struct LbUsageBreakdownRes {
+    err: *mut LbFfiErr,
+    entries: *mut LbUsageEntry,
+    len: usize,
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn lb_get_usage_breakdown(lb: *mut Lb) -> LbUsageBreakdownRes {
+    match rlb(lb).get_usage_breakdown() {
+        Ok(entries) => {
+            let (entries, len) = carray(
+                entries
+                    .into_iter()
+                    .map(|entry| LbUsageEntry {
+                        id: entry.id.into(),
+                        synced: entry.synced,
+                        local: entry.local,
+                    })
+                    .collect(),
+            );
+            LbUsageBreakdownRes { err: null_mut(), entries, len }
+        }
+        Err(err) => LbUsageBreakdownRes { err: lb_err(err), entries: null_mut(), len: 0 },
     }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn lb_bytes_to_human(bytes: u64) -> *mut c_char {
+    cstring(model::usage::bytes_to_human(bytes))
 }
 
 #[unsafe(no_mangle)]
@@ -1048,25 +1230,6 @@ pub extern "C" fn lb_content_searcher_snippet(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn lb_upgrade_account_stripe(
-    lb: *mut Lb, is_old_card: bool, number: *const c_char, exp_year: i32, exp_month: i32,
-    cvc: *const c_char,
-) -> *mut LbFfiErr {
-    let lb = rlb(lb);
-
-    let payment_method = if is_old_card {
-        PaymentMethod::OldCard
-    } else {
-        PaymentMethod::NewCard { number: rstring(number), exp_year, exp_month, cvc: rstring(cvc) }
-    };
-
-    match lb.upgrade_account_stripe(StripeAccountTier::Premium(payment_method)) {
-        Ok(()) => null_mut(),
-        Err(err) => lb_err(err),
-    }
-}
-
-#[unsafe(no_mangle)]
 pub extern "C" fn lb_upgrade_account_app_store(
     lb: *mut Lb, original_transaction_id: *const c_char, app_account_token: *const c_char,
 ) -> *mut LbFfiErr {
@@ -1197,7 +1360,7 @@ pub struct LbStatus {
     pub pushing_files: LbIds,
     pub dirty_locally: LbIds,
     pub pulling_files: LbIds,
-    pub space_used: *mut LbUsageMetrics,
+    pub usage: LbUsageMetrics,
     pub msg: *mut c_char,
     pub unexpected_sync_problem: *mut c_char,
 }
@@ -1226,15 +1389,7 @@ pub extern "C" fn lb_get_status(lb: *mut Lb) -> LbStatus {
     let pulling_files = carray(status.pulling_files.into_iter().map(LbUuid::from).collect());
     let pulling_files = LbIds { ids: pulling_files.0, len: pulling_files.1 };
 
-    let space_used = match status.space_used {
-        Some(usage) => Box::into_raw(Box::new(LbUsageMetrics {
-            server_used_exact: usage.server_usage.exact,
-            server_used_human: cstring(usage.server_usage.readable),
-            server_cap_exact: usage.data_cap.exact,
-            server_cap_human: cstring(usage.data_cap.readable),
-        })),
-        None => null_mut(),
-    };
+    let usage = status.usage.into();
 
     LbStatus {
         offline: status.offline,
@@ -1245,7 +1400,7 @@ pub extern "C" fn lb_get_status(lb: *mut Lb) -> LbStatus {
         pushing_files,
         dirty_locally,
         pulling_files,
-        space_used,
+        usage,
         msg,
         unexpected_sync_problem,
     }

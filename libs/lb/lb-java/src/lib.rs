@@ -10,8 +10,7 @@ use jni::sys::{jboolean, jbyteArray, jint, jlong, jobject, jobjectArray, jstring
 pub use lb_rs::blocking::Lb;
 use lb_rs::model::account::Account;
 use lb_rs::model::api::{
-    AppStoreAccountState, GooglePlayAccountState, PaymentMethod, PaymentPlatform,
-    StripeAccountTier, SubscriptionInfo,
+    AppStoreAccountState, GooglePlayAccountState, PaymentPlatform, SubscriptionInfo,
 };
 use lb_rs::model::core_config::host_os_version;
 pub use lb_rs::model::core_config::{ClientType, Config};
@@ -460,7 +459,58 @@ pub extern "system" fn Java_net_lockbook_Lb_getUsage<'local>(
         return throw_err(&mut env, lb_usage.err().unwrap()).into_raw();
     }
 
-    j_usage(&mut env, Some(lb_usage.unwrap())).into_raw()
+    j_usage(&mut env, lb_usage.unwrap()).into_raw()
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_net_lockbook_Lb_refreshUsage<'local>(
+    mut env: JNIEnv<'local>, class: JClass<'local>,
+) -> jobject {
+    let lb = rlb(&mut env, &class);
+
+    match lb.refresh_usage() {
+        Ok(usage) => j_usage(&mut env, usage),
+        Err(err) => throw_err(&mut env, err),
+    }
+    .into_raw()
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_net_lockbook_Lb_getUsageBreakdown<'local>(
+    mut env: JNIEnv<'local>, class: JClass<'local>,
+) -> jobjectArray {
+    let lb = rlb(&mut env, &class);
+
+    let entries = match lb.get_usage_breakdown() {
+        Ok(entries) => entries,
+        Err(err) => return throw_err(&mut env, err).into_raw(),
+    };
+
+    let entry_class = env.find_class("net/lockbook/UsageEntry").unwrap();
+    let arr = env
+        .new_object_array(entries.len() as i32, &entry_class, JObject::null())
+        .unwrap();
+
+    for (i, entry) in entries.into_iter().enumerate() {
+        let obj = env.alloc_object(&entry_class).unwrap();
+        let id = jni_string(&mut env, entry.id.to_string());
+        env.set_field(&obj, "id", "Ljava/lang/String;", JValue::Object(&id))
+            .unwrap();
+        env.set_field(&obj, "synced", "J", JValue::Long(entry.synced as jlong))
+            .unwrap();
+        env.set_field(&obj, "local", "J", JValue::Long(entry.local as jlong))
+            .unwrap();
+        env.set_object_array_element(&arr, i as i32, obj).unwrap();
+    }
+
+    arr.into_raw()
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_net_lockbook_Lb_bytesToHuman<'local>(
+    mut env: JNIEnv<'local>, _class: JClass<'local>, bytes: jlong,
+) -> jstring {
+    jni_string(&mut env, lb_rs::model::usage::bytes_to_human(bytes as u64)).into_raw()
 }
 
 #[unsafe(no_mangle)]
@@ -648,21 +698,26 @@ pub extern "system" fn Java_net_lockbook_Lb_upgradeAccountGooglePlay<'local>(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_net_lockbook_Lb_upgradeAccountStripe<'local>(
-    mut env: JNIEnv<'local>, class: JClass<'local>, jnumber: JString<'local>, exp_year: jint,
-    exp_month: jint, jcvc: JString<'local>,
-) {
+pub extern "system" fn Java_net_lockbook_Lb_stripeCheckoutUrl<'local>(
+    mut env: JNIEnv<'local>, class: JClass<'local>,
+) -> jstring {
     let lb = rlb(&mut env, &class);
 
-    let payment_method = PaymentMethod::NewCard {
-        number: rstring(&mut env, jnumber),
-        exp_year,
-        exp_month,
-        cvc: rstring(&mut env, jcvc),
-    };
+    match lb.stripe_checkout_url() {
+        Ok(url) => jni_string(&mut env, url).into_raw(),
+        Err(err) => throw_err(&mut env, err).into_raw(),
+    }
+}
 
-    if let Err(err) = lb.upgrade_account_stripe(StripeAccountTier::Premium(payment_method)) {
-        throw_err(&mut env, err);
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_net_lockbook_Lb_stripeBillingPortalUrl<'local>(
+    mut env: JNIEnv<'local>, class: JClass<'local>,
+) -> jstring {
+    let lb = rlb(&mut env, &class);
+
+    match lb.stripe_billing_portal_url() {
+        Ok(url) => jni_string(&mut env, url).into_raw(),
+        Err(err) => throw_err(&mut env, err).into_raw(),
     }
 }
 
@@ -822,30 +877,22 @@ fn j_usage_item_metric<'local>(
 }
 
 fn j_usage<'local>(
-    env: &mut JNIEnv<'local>, usage: Option<lb_rs::service::usage::UsageMetrics>,
+    env: &mut JNIEnv<'local>, usage: lb_rs::service::usage::UsageMetrics,
 ) -> JObject<'local> {
-    let Some(usage) = usage else { return JObject::null() };
-
     let usage_class = env.find_class("net/lockbook/Usage").unwrap();
     let obj = env.alloc_object(usage_class).unwrap();
 
-    let server_usage = j_usage_item_metric(env, Some(usage.server_usage));
-    env.set_field(
-        &obj,
-        "serverUsage",
-        "Lnet/lockbook/Usage$UsageItemMetric;",
-        JValue::Object(&server_usage),
-    )
-    .unwrap();
-
-    let data_cap = j_usage_item_metric(env, Some(usage.data_cap));
-    env.set_field(
-        &obj,
-        "dataCap",
-        "Lnet/lockbook/Usage$UsageItemMetric;",
-        JValue::Object(&data_cap),
-    )
-    .unwrap();
+    for (field, metric) in [
+        ("synced", Some(usage.synced)),
+        ("local", Some(usage.local)),
+        ("added", Some(usage.added)),
+        ("freed", Some(usage.freed)),
+        ("dataCap", usage.data_cap),
+    ] {
+        let metric = j_usage_item_metric(env, metric);
+        env.set_field(&obj, field, "Lnet/lockbook/Usage$UsageItemMetric;", JValue::Object(&metric))
+            .unwrap();
+    }
 
     obj
 }
@@ -898,8 +945,8 @@ fn j_status<'local>(
     env.set_field(&obj, "pullingFiles", "[Ljava/lang/String;", JValue::Object(&pulling_files))
         .unwrap();
 
-    let space_used = j_usage(env, status.space_used);
-    env.set_field(&obj, "spaceUsed", "Lnet/lockbook/Usage;", JValue::Object(&space_used))
+    let usage = j_usage(env, status.usage);
+    env.set_field(&obj, "usage", "Lnet/lockbook/Usage;", JValue::Object(&usage))
         .unwrap();
 
     let sync_status = match status.sync_status {

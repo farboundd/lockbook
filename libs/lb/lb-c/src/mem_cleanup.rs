@@ -7,11 +7,11 @@ use crate::ffi_utils::rvec;
 use crate::lb_c_err::LbFfiErr;
 use crate::lb_file::LbFile;
 use crate::{
-    LbAccountRes, LbContentSearcherResults, LbContentSearcherSnippet, LbDocRes,
-    LbExportAccountQRRes, LbExportAccountRes, LbFileListRes, LbFileRes, LbGetFileLinkUrlRes,
-    LbIdListRes, LbInitRes, LbLastSyncedHuman, LbLastSyncedi64, LbNextNameRes, LbPathRes,
-    LbPathSearcherResults, LbPathsRes, LbStatus, LbSubscriptionInfoRes, LbUsageMetricsRes,
-    LbUsernamesRes,
+    LbAccountRes, LbContentSearcherResults, LbContentSearcherSnippet, LbCreateSubAccountRes,
+    LbDocRes, LbExportAccountQRRes, LbExportAccountRes, LbFileListRes, LbFileRes,
+    LbGetFileLinkUrlRes, LbIdListRes, LbInitRes, LbLastSyncedHuman, LbLastSyncedi64, LbNextNameRes,
+    LbPathRes, LbPathSearcherResults, LbPathsRes, LbStatus, LbSubAccountsRes,
+    LbSubscriptionInfoRes, LbUsageBreakdownRes, LbUsageMetrics, LbUsageMetricsRes, LbUsernamesRes,
 };
 
 #[unsafe(no_mangle)]
@@ -83,6 +83,33 @@ pub extern "C" fn lb_free_export_account_qr(acc: LbExportAccountQRRes) {
 
     if !acc.qr.is_null() {
         drop(rvec(acc.qr, acc.qr_len));
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn lb_free_create_sub_account_res(res: LbCreateSubAccountRes) {
+    if !res.err.is_null() {
+        lb_free_err(res.err);
+    }
+
+    if !res.username.is_null() {
+        unsafe { drop(CString::from_raw(res.username)) }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn lb_free_sub_accounts_res(res: LbSubAccountsRes) {
+    if !res.err.is_null() {
+        lb_free_err(res.err);
+    }
+
+    if !res.sub_accounts.is_null() {
+        let sub_accounts = rvec(res.sub_accounts, res.len);
+        for sub_account in &sub_accounts {
+            unsafe { drop(CString::from_raw(sub_account.username)) };
+        }
+
+        drop(sub_accounts);
     }
 }
 
@@ -236,12 +263,25 @@ pub extern "C" fn lb_free_usage_metrics(usage: LbUsageMetricsRes) {
         lb_free_err(usage.err);
     }
 
-    if !usage.usages.server_cap_human.is_null() {
-        unsafe { drop(CString::from_raw(usage.usages.server_cap_human)) }
+    free_usage(usage.usages);
+}
+
+fn free_usage(usage: LbUsageMetrics) {
+    for item in [usage.synced, usage.local, usage.added, usage.freed, usage.data_cap] {
+        if !item.human.is_null() {
+            unsafe { drop(CString::from_raw(item.human)) }
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn lb_free_usage_breakdown(breakdown: LbUsageBreakdownRes) {
+    if !breakdown.err.is_null() {
+        lb_free_err(breakdown.err);
     }
 
-    if !usage.usages.server_used_human.is_null() {
-        unsafe { drop(CString::from_raw(usage.usages.server_used_human)) }
+    if !breakdown.entries.is_null() {
+        drop(rvec(breakdown.entries, breakdown.len));
     }
 }
 
@@ -340,6 +380,8 @@ pub extern "C" fn lb_free_sub_info(sub_info: LbSubscriptionInfoRes) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn lb_free_status(status: LbStatus) {
+    free_usage(status.usage);
+
     if !status.pushing_files.ids.is_null() {
         drop(rvec(status.pushing_files.ids, status.pushing_files.len));
     }
@@ -353,21 +395,6 @@ pub extern "C" fn lb_free_status(status: LbStatus) {
     }
 
     unsafe {
-        if !status.space_used.is_null() {
-            let usage = status.space_used;
-            let usage = Box::from_raw(usage);
-
-            if !usage.server_cap_human.is_null() {
-                drop(CString::from_raw(usage.server_cap_human))
-            }
-
-            if !usage.server_used_human.is_null() {
-                drop(CString::from_raw(usage.server_used_human))
-            }
-
-            drop(usage);
-        }
-
         if !status.msg.is_null() {
             drop(CString::from_raw(status.msg));
         }

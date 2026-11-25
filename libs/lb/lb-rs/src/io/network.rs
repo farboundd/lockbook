@@ -168,6 +168,24 @@ impl Server for Network {
         self.request(account, request).await
     }
 
+    async fn new_sub_account(
+        &self, account: &Account, request: NewSubAccountRequest,
+    ) -> ApiResult<NewSubAccountRequest> {
+        self.request(account, request).await
+    }
+
+    async fn list_sub_accounts(
+        &self, account: &Account, request: ListSubAccountsRequest,
+    ) -> ApiResult<ListSubAccountsRequest> {
+        self.request(account, request).await
+    }
+
+    async fn delete_sub_account(
+        &self, account: &Account, request: DeleteSubAccountRequest,
+    ) -> ApiResult<DeleteSubAccountRequest> {
+        self.request(account, request).await
+    }
+
     async fn change_doc_v2(
         &self, account: &Account, request: ChangeDocRequestV2,
     ) -> ApiResult<ChangeDocRequestV2> {
@@ -228,9 +246,15 @@ impl Server for Network {
         self.request(account, request).await
     }
 
-    async fn upgrade_account_stripe(
-        &self, account: &Account, request: UpgradeAccountStripeRequest,
-    ) -> ApiResult<UpgradeAccountStripeRequest> {
+    async fn stripe_checkout(
+        &self, account: &Account, request: StripeCheckoutRequest,
+    ) -> ApiResult<StripeCheckoutRequest> {
+        self.request(account, request).await
+    }
+
+    async fn stripe_billing_portal(
+        &self, account: &Account, request: StripeBillingPortalRequest,
+    ) -> ApiResult<StripeBillingPortalRequest> {
         self.request(account, request).await
     }
 
@@ -315,6 +339,12 @@ impl Server for Network {
     async fn admin_set_user_tier(
         &self, account: &Account, request: AdminSetUserTierRequest,
     ) -> ApiResult<AdminSetUserTierRequest> {
+        self.request(account, request).await
+    }
+
+    async fn admin_sync_stripe(
+        &self, account: &Account, request: AdminSyncStripeRequest,
+    ) -> ApiResult<AdminSyncStripeRequest> {
         self.request(account, request).await
     }
 

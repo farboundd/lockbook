@@ -49,7 +49,11 @@ fn draw_free_tier(ui: &mut egui::Ui) {
 }
 
 fn draw_stripe(ui: &mut egui::Ui, last4: &str) -> Option<SubscriptionResponse> {
-    ui.heading(format!("Stripe ({last4})"));
+    if last4.is_empty() {
+        ui.heading("Stripe");
+    } else {
+        ui.heading(format!("Stripe ({last4})"));
+    }
     None
 }
 
@@ -68,8 +72,9 @@ fn draw_app_store(
 }
 
 fn usage_bar(ui: &mut egui::Ui, metrics: &UsageMetrics) {
-    let used = metrics.server_usage.exact as f32;
-    let available = metrics.data_cap.exact as f32;
+    let Some(cap) = &metrics.data_cap else { return };
+    let used = metrics.local.exact as f32;
+    let available = cap.exact as f32;
     let human_usage = bytes_to_human(used as u64);
     let percent = used / available;
 

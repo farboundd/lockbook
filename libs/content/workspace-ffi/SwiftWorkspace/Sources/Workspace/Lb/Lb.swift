@@ -13,6 +13,11 @@ public protocol LbAPI {
     func logoutAndExit()
     func exportAccountPrivateKey() -> Result<String, LbError>
     func exportAccountPhrase() -> Result<String, LbError>
+    func createSubAccount(label: String) -> Result<String, LbError>
+    func listSubAccounts() -> Result<[SubAccount], LbError>
+    func deleteSubAccount(username: String) -> Result<Void, LbError>
+    func exportSubAccountPrivateKey(username: String) -> Result<String, LbError>
+    func exportSubAccountPhrase(username: String) -> Result<String, LbError>
     func createFile(name: String, parent: UUID, fileType: FileType) -> Result<File, LbError>
     func createLink(name: String, parent: UUID, target: UUID) -> Result<File, LbError>
     func nextName(parent: UUID, desired: String) -> Result<String, LbError>
@@ -31,12 +36,15 @@ public protocol LbAPI {
     func getPendingShareFiles() -> Result<[File], LbError>
     func deletePendingShare(id: UUID) -> Result<Void, LbError>
     func debugInfo() -> String
+    func writePanicToFile(info: String, backtrace: String) -> Result<Void, LbError>
     func sync() -> Result<Void, LbError>
     func appForegrounded()
     func pinFile(id: UUID) -> Result<Void, LbError>
     func unpinFile(id: UUID) -> Result<Void, LbError>
     func listPinned() -> Result<[UUID], LbError>
     func getUsage() -> Result<UsageMetrics, LbError>
+    func refreshUsage() -> Result<UsageMetrics, LbError>
+    func getUsageBreakdown() -> Result<[UsageEntry], LbError>
     func importFiles(sources: [String], dest: UUID) -> Result<Void, LbError>
     func exportFile(sourceId: UUID, dest: String, edit: Bool) -> Result<Void, LbError>
     func getFileLinkUrl(id: UUID) -> Result<String, LbError>
@@ -149,6 +157,61 @@ public class Lb: LbAPI {
 
     public func exportAccountPhrase() -> Result<String, LbError> {
         let res = lb_export_account_phrase(lb)
+        defer { lb_free_export_account(res) }
+
+        guard res.err == nil else {
+            return .failure(LbError(res.err.pointee))
+        }
+
+        return .success(String(cString: res.account_string))
+    }
+
+    public func createSubAccount(label: String) -> Result<String, LbError> {
+        let res = lb_create_sub_account(lb, label)
+        defer { lb_free_create_sub_account_res(res) }
+
+        guard res.err == nil else {
+            return .failure(LbError(res.err.pointee))
+        }
+
+        return .success(String(cString: res.username))
+    }
+
+    public func listSubAccounts() -> Result<[SubAccount], LbError> {
+        let res = lb_list_sub_accounts(lb)
+        defer { lb_free_sub_accounts_res(res) }
+
+        guard res.err == nil else {
+            return .failure(LbError(res.err.pointee))
+        }
+
+        return .success(UnsafeBufferPointer(start: res.sub_accounts, count: Int(res.len)).map { SubAccount($0) })
+    }
+
+    public func deleteSubAccount(username: String) -> Result<Void, LbError> {
+        let err = lb_delete_sub_account(lb, username)
+
+        if let err {
+            defer { lb_free_err(err) }
+            return .failure(LbError(err.pointee))
+        }
+
+        return .success(())
+    }
+
+    public func exportSubAccountPrivateKey(username: String) -> Result<String, LbError> {
+        let res = lb_export_sub_account_private_key(lb, username)
+        defer { lb_free_export_account(res) }
+
+        guard res.err == nil else {
+            return .failure(LbError(res.err.pointee))
+        }
+
+        return .success(String(cString: res.account_string))
+    }
+
+    public func exportSubAccountPhrase(username: String) -> Result<String, LbError> {
+        let res = lb_export_sub_account_phrase(lb, username)
         defer { lb_free_export_account(res) }
 
         guard res.err == nil else {
@@ -352,6 +415,17 @@ public class Lb: LbAPI {
         return String(cString: debugInfo!)
     }
 
+    public func writePanicToFile(info: String, backtrace: String) -> Result<Void, LbError> {
+        let err = lb_write_panic_to_file(lb, info, backtrace)
+
+        if let err {
+            defer { lb_free_err(err) }
+            return .failure(LbError(err.pointee))
+        }
+
+        return .success(())
+    }
+
     class UpdateSyncStatus {
         let closure: ((UInt, UInt, UUID, String) -> Void)?
 
@@ -426,6 +500,30 @@ public class Lb: LbAPI {
         }
 
         return .success(UsageMetrics(res.usages))
+    }
+
+    public func refreshUsage() -> Result<UsageMetrics, LbError> {
+        let res = lb_refresh_usage(lb)
+        defer { lb_free_usage_metrics(res) }
+
+        guard res.err == nil else {
+            return .failure(LbError(res.err.pointee))
+        }
+
+        return .success(UsageMetrics(res.usages))
+    }
+
+    public func getUsageBreakdown() -> Result<[UsageEntry], LbError> {
+        let res = lb_get_usage_breakdown(lb)
+        defer { lb_free_usage_breakdown(res) }
+
+        guard res.err == nil else {
+            return .failure(LbError(res.err.pointee))
+        }
+
+        return .success(Array(UnsafeBufferPointer(start: res.entries, count: Int(res.len))).map {
+            UsageEntry(id: $0.id.toUUID(), synced: $0.synced, local: $0.local)
+        })
     }
 
     public func importFiles(sources: [String], dest: UUID) -> Result<Void, LbError> {
@@ -556,6 +654,14 @@ public class Lb: LbAPI {
 }
 
 public class MockLb: LbAPI {
+    static let usage = UsageMetrics(
+        synced: UsageItem(exact: 100, human: "100 B"),
+        local: UsageItem(exact: 100, human: "100 B"),
+        added: .zero,
+        freed: .zero,
+        dataCap: UsageItem(exact: 1000, human: "1 KB")
+    )
+
     public var lbUnsafeRawPtr: UnsafeMutableRawPointer?
     public var events: Events = .init()
 
@@ -601,6 +707,16 @@ public class MockLb: LbAPI {
     public func logoutAndExit() {}
     public func exportAccountPrivateKey() -> Result<String, LbError> { .success(accountPK) }
     public func exportAccountPhrase() -> Result<String, LbError> { .success(accountPhrase) }
+    public func createSubAccount(label: String) -> Result<String, LbError> { .success("smail+\(label.lowercased())") }
+    public func listSubAccounts() -> Result<[SubAccount], LbError> {
+        .success([
+            SubAccount(username: "smail+bot", usage: UsageItem(exact: 2048, human: "2 KB")),
+            SubAccount(username: "smail+site", usage: UsageItem(exact: 100, human: "100 B")),
+        ])
+    }
+    public func deleteSubAccount(username: String) -> Result<Void, LbError> { .success(()) }
+    public func exportSubAccountPrivateKey(username: String) -> Result<String, LbError> { .success(accountPK) }
+    public func exportSubAccountPhrase(username: String) -> Result<String, LbError> { .success(accountPhrase) }
     public func createFile(name: String, parent: UUID, fileType: FileType) -> Result<File, LbError> { .success(file1) }
     public func createLink(name: String, parent: UUID, target: UUID) -> Result<File, LbError> { .success(File(id: UUID(), parent: UUID(), name: "about-link.md", type: .link(file2.id), lastModifiedBy: "smail", lastModified: 1735857215, owner: "smail", shares: [])) }
     public func nextName(parent: UUID, desired: String) -> Result<String, LbError> { .success(desired) }
@@ -624,13 +740,16 @@ public class MockLb: LbAPI {
     public func getPendingShareFiles() -> Result<[File], LbError> { .success([file1, file1, file1, file1, file1]) }
     public func deletePendingShare(id: UUID) -> Result<Void, LbError> { .success(()) }
     public func debugInfo() -> String { "No debug info. This is a preview." }
+    public func writePanicToFile(info: String, backtrace: String) -> Result<Void, LbError> { .success(()) }
     public func sync() -> Result<Void, LbError> { .success(()) }
     public func appForegrounded() {}
     public func pinFile(id: UUID) -> Result<Void, LbError> { .success(()) }
     public func searchAccepted(id _: UUID) -> Result<Void, LbError> { .success(()) }
     public func unpinFile(id: UUID) -> Result<Void, LbError> { .success(()) }
     public func listPinned() -> Result<[UUID], LbError> { .success([file1.id]) }
-    public func getUsage() -> Result<UsageMetrics, LbError> { .success(UsageMetrics(serverUsedExact: 100, serverUsedHuman: "100B", serverCapExact: 1000, serverCapHuman: "1000B")) }
+    public func getUsage() -> Result<UsageMetrics, LbError> { .success(MockLb.usage) }
+    public func refreshUsage() -> Result<UsageMetrics, LbError> { .success(MockLb.usage) }
+    public func getUsageBreakdown() -> Result<[UsageEntry], LbError> { .success([UsageEntry(id: file1.id, synced: 100, local: 100)]) }
     public func importFiles(sources: [String], dest: UUID) -> Result<Void, LbError> { .success(()) }
     public func exportFile(sourceId: UUID, dest: String, edit: Bool) -> Result<Void, LbError> { .success(()) }
     public func getFileLinkUrl(id: UUID) -> Result<String, LbError> {

@@ -56,8 +56,7 @@ where
             return Err(ClientError(NewAccountError::Disabled));
         }
 
-        // a root is never an attachments folder, the only file written as V2
-        if crate::file_service::writes_v2(&request.root_folder) {
+        if self.config.features.refuses(&request.root_folder) {
             return Err(internal!("new account root is V2 metadata"));
         }
 
@@ -166,6 +165,7 @@ where
             &mut db.owned_files,
             &mut db.shared_files,
             &mut db.file_children,
+            &mut db.file_attachments,
             &mut db.metas,
         )?
         .to_lazy();
@@ -194,7 +194,7 @@ where
     ) -> Result<u64, ServerError<GetUsageHelperError>> {
         Ok(db
             .accounts
-            .get(&Owner(*public_key))
+            .get(&Self::billed_owner(db, Owner(*public_key)))
             .ok_or(ServerError::ClientError(GetUsageHelperError::UserNotFound))?
             .billing_info
             .data_cap())
@@ -370,6 +370,7 @@ where
                 &mut db.owned_files,
                 &mut db.shared_files,
                 &mut db.file_children,
+                &mut db.file_attachments,
                 &mut db.metas,
             )?
             .to_lazy()
@@ -393,60 +394,112 @@ where
         &self, public_key: &PublicKey, free_username: bool,
     ) -> Result<(), ServerError<DeleteAccountHelperError>> {
         let mut docs_to_delete = Vec::new();
+        let mut stripe_customer_to_cancel = None;
+        let mut stripe_subscription_to_cancel = None;
 
         {
             let mut lock = self.index_db.lock().await;
             let mut tx = ServerTx::begin(&mut lock)?;
             let db = &mut *tx;
 
-            let mut tree = ServerTree::new(
-                Owner(*public_key),
-                &mut db.owned_files,
-                &mut db.shared_files,
-                &mut db.file_children,
-                &mut db.metas,
-            )?
-            .to_lazy();
-            let metas_to_delete = tree.ids();
-
-            for id in metas_to_delete.clone() {
-                if !tree.calculate_deleted(&id)? {
-                    let meta = tree.find(&id)?;
-                    if meta.is_document() && &(meta.owner().0) == public_key {
-                        if let Some(hmac) = meta.document_hmac() {
-                            docs_to_delete.push((*meta.id(), *hmac));
+            let owner = Owner(*public_key);
+            if !db.sub_accounts.contains_key(&owner) {
+                if let Some(account) = db.accounts.get(&owner) {
+                    if let Some(BillingPlatform::Stripe(info)) =
+                        &account.billing_info.billing_platform
+                    {
+                        if !info.customer_id.is_empty() {
+                            stripe_customer_to_cancel = Some(info.customer_id.clone());
+                        }
+                        if !info.subscription_id.is_empty() {
+                            stripe_subscription_to_cancel = Some(info.subscription_id.clone());
                         }
                     }
                 }
-            }
-            db.owned_files.clear_key(&Owner(*public_key))?;
-            db.shared_files.clear_key(&Owner(*public_key))?;
-            db.last_seen.remove(&Owner(*public_key))?;
-
-            for id in metas_to_delete {
-                if let Some(meta) = db.metas.get(&id) {
-                    if &(meta.owner().0) == public_key {
-                        for user_access_key in meta.user_access_keys() {
-                            let sharee = Owner(user_access_key.encrypted_for);
-                            db.shared_files.remove(&sharee, meta.id())?;
-                        }
-                        db.metas.remove(&id)?;
-                        db.file_children.clear_key(&id)?;
-                    }
+                if stripe_customer_to_cancel.is_none() {
+                    stripe_customer_to_cancel = db
+                        .stripe_ids
+                        .iter()
+                        .find(|(_, o)| **o == owner)
+                        .map(|(cus_id, _)| cus_id.clone());
                 }
             }
 
-            if free_username {
-                let username = db
-                    .accounts
-                    .remove(&Owner(*public_key))?
-                    .ok_or(ClientError(DeleteAccountHelperError::UserNotFound))?
-                    .username;
-                db.usernames.remove(&username)?;
+            let mut owners = vec![Owner(*public_key)];
+            owners.extend(Self::live_sub_accounts(db, Owner(*public_key)));
+
+            for Owner(public_key) in &owners {
+                let mut tree = ServerTree::new(
+                    Owner(*public_key),
+                    &mut db.owned_files,
+                    &mut db.shared_files,
+                    &mut db.file_children,
+                    &mut db.file_attachments,
+                    &mut db.metas,
+                )?
+                .to_lazy();
+                let metas_to_delete = tree.ids();
+
+                for id in metas_to_delete.clone() {
+                    if !tree.calculate_deleted(&id)? {
+                        let meta = tree.find(&id)?;
+                        if meta.is_document() && &(meta.owner().0) == public_key {
+                            if let Some(hmac) = meta.document_hmac() {
+                                docs_to_delete.push((*meta.id(), *hmac));
+                            }
+                        }
+                    }
+                }
+                db.owned_files.clear_key(&Owner(*public_key))?;
+                db.shared_files.clear_key(&Owner(*public_key))?;
+                db.last_seen.remove(&Owner(*public_key))?;
+
+                for id in metas_to_delete {
+                    if let Some(meta) = db.metas.get(&id) {
+                        if &(meta.owner().0) == public_key {
+                            for user_access_key in meta.user_access_keys() {
+                                let sharee = Owner(user_access_key.encrypted_for);
+                                db.shared_files.remove(&sharee, meta.id())?;
+                            }
+                            db.metas.remove(&id)?;
+                            db.file_children.clear_key(&id)?;
+                            db.file_attachments.clear_key(&id)?;
+                        }
+                    }
+                }
+
+                if free_username {
+                    let username = db
+                        .accounts
+                        .remove(&Owner(*public_key))?
+                        .ok_or(ClientError(DeleteAccountHelperError::UserNotFound))?
+                        .username;
+                    db.usernames.remove(&username)?;
+                }
+
+                if let Some(mut sub_account) = db.sub_accounts.get(&Owner(*public_key)).cloned() {
+                    sub_account.deleted = true;
+                    db.sub_accounts.insert(Owner(*public_key), sub_account)?;
+                }
+                if free_username {
+                    let sub_accounts = db.sub_accounts_by_parent.get(&Owner(*public_key));
+                    for sub_account in sub_accounts.cloned().unwrap_or_default() {
+                        db.sub_accounts.remove(&sub_account)?;
+                    }
+                    db.sub_accounts_by_parent.clear_key(&Owner(*public_key))?;
+                }
             }
 
             tx.end()?;
             drop(lock);
+        }
+
+        if stripe_customer_to_cancel.is_some() || stripe_subscription_to_cancel.is_some() {
+            self.cancel_stripe_on_account_delete(
+                stripe_customer_to_cancel.as_deref(),
+                stripe_subscription_to_cancel.as_deref(),
+            )
+            .await;
         }
 
         for (id, version) in docs_to_delete {

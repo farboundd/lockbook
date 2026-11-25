@@ -8,7 +8,8 @@ use cli_rs::cli_error::{CliError, CliResult};
 use is_terminal::IsTerminal;
 use lb_rs::DEFAULT_API_LOCATION;
 use lb_rs::Lb;
-use lb_rs::model::api::{PaymentMethod, PaymentPlatform, StripeAccountTier};
+use lb_rs::model::account::SUB_ACCOUNT_SEPARATOR;
+use lb_rs::model::api::PaymentPlatform;
 
 use crate::{core, ensure_account, input};
 
@@ -100,40 +101,18 @@ pub async fn subscribe() -> Result<(), CliError> {
     let lb = &core().await?;
     ensure_account(lb)?;
 
-    println!("checking for existing payment methods...");
-    let existing_card =
-        lb.get_subscription_info()
-            .await?
-            .and_then(|info| match info.payment_platform {
-                PaymentPlatform::Stripe { card_last_4_digits } => Some(card_last_4_digits),
-                PaymentPlatform::GooglePlay { .. } => None,
-                PaymentPlatform::AppStore { .. } => None,
-            });
+    let url = lb.stripe_checkout_url().await?;
+    println!("finish subscribing in your browser:\n{url}");
+    Ok(())
+}
 
-    let mut use_old_card = false;
-    if let Some(card) = existing_card {
-        let answer: String = input::std_in(format!("do you want use *{card}? [y/n]: "))?;
-        if answer == "y" || answer == "Y" {
-            use_old_card = true;
-        }
-    } else {
-        println!("no existing cards found...");
-    }
+#[tokio::main]
+pub async fn billing() -> Result<(), CliError> {
+    let lb = &core().await?;
+    ensure_account(lb)?;
 
-    let payment_method = if use_old_card {
-        PaymentMethod::OldCard
-    } else {
-        PaymentMethod::NewCard {
-            number: input::std_in("enter your card number: ")?,
-            exp_year: input::std_in("expiration year: ")?,
-            exp_month: input::std_in("expiration month: ")?,
-            cvc: input::std_in("cvc: ")?,
-        }
-    };
-
-    lb.upgrade_account_stripe(StripeAccountTier::Premium(payment_method))
-        .await?;
-    println!("subscribed!");
+    let url = lb.stripe_billing_portal_url().await?;
+    println!("manage your billing in your browser:\n{url}");
     Ok(())
 }
 
@@ -147,6 +126,7 @@ pub async fn unsubscribe() -> Result<(), CliError> {
     if answer == "y" || answer == "Y" {
         println!("cancelling subscription... ");
         lb.cancel_subscription().await?;
+        println!("canceled; premium lasts until the end of the period you paid for");
     }
     Ok(())
 }
@@ -168,15 +148,24 @@ pub async fn status() -> Result<(), CliError> {
         n => println!("unsynced changes: {n} files"),
     }
 
-    let cap = lb.get_usage().await?;
-    let pct = (cap.server_usage.exact * 100)
-        .checked_div(cap.data_cap.exact)
+    let usage = lb.refresh_usage().await?;
+    let pct = usage
+        .data_cap
+        .as_ref()
+        .and_then(|cap| (usage.local.exact * 100).checked_div(cap.exact))
         .unwrap_or(0);
 
-    if let Some(info) = lb.get_subscription_info().await? {
+    if lb.get_account()?.username.contains(SUB_ACCOUNT_SEPARATOR) {
+        println!("type: sub-account");
+    } else if let Some(info) = lb.get_subscription_info().await? {
+        let is_stripe = matches!(info.payment_platform, PaymentPlatform::Stripe { .. });
         match info.payment_platform {
             PaymentPlatform::Stripe { card_last_4_digits } => {
-                println!("type: Stripe, *{card_last_4_digits}")
+                if card_last_4_digits.is_empty() {
+                    println!("type: Stripe");
+                } else {
+                    println!("type: Stripe, *{card_last_4_digits}");
+                }
             }
             PaymentPlatform::GooglePlay { account_state } => {
                 println!("type: Google Play");
@@ -187,20 +176,43 @@ pub async fn status() -> Result<(), CliError> {
                 println!("state: {account_state:?}");
             }
         }
+        let period_end_ms = if info.period_end >= 1_000_000_000_000 {
+            info.period_end as i64
+        } else {
+            info.period_end as i64 * 1000
+        };
         let renewal_date = Utc
-            .timestamp_millis_opt(info.period_end as i64)
+            .timestamp_millis_opt(period_end_ms)
             .single()
             .map(|dt| dt.format("%B %d, %Y").to_string())
             .unwrap_or_else(|| info.period_end.to_string());
-        println!("renews on: {}", renewal_date);
+        if is_stripe {
+            println!("paid through: {renewal_date}");
+        } else {
+            println!("renews on: {renewal_date}");
+        }
     } else {
         println!("type: trial tier");
     }
-    println!(
-        "usage: {} / {} ({}% utilized)",
-        cap.server_usage.readable, cap.data_cap.readable, pct
-    );
-    if pct >= 90 {
+    match &usage.data_cap {
+        Some(cap) => {
+            println!("usage: {} / {} ({}% utilized)", usage.local.readable, cap.readable, pct)
+        }
+        None => println!("usage: {}", usage.local.readable),
+    }
+    let mut unsynced = vec![];
+    if usage.added.exact > 0 {
+        unsynced.push(format!("+{}", usage.added.readable));
+    }
+    if usage.freed.exact > 0 {
+        unsynced.push(format!("-{}", usage.freed.readable));
+    }
+    if !unsynced.is_empty() {
+        println!("unsynced usage: {} (synced: {})", unsynced.join(" / "), usage.synced.readable);
+    }
+    if usage.over_cap() {
+        println!("warning: over the data cap, sync will fail until space is freed");
+    } else if pct >= 90 {
         println!("warning: storage is nearly full");
     }
     Ok(())

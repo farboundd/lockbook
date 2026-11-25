@@ -18,6 +18,7 @@ mod list;
 mod migrate;
 mod share;
 mod stream;
+mod subaccount;
 
 use std::env;
 use std::path::PathBuf;
@@ -70,11 +71,15 @@ fn run() -> CliResult<()> {
                         .handler(|skip_check, phrase| account::export(skip_check.get(), phrase.get()))
                 )
                 .subcommand(
-                    Command::name("subscribe").description("start a monthly subscription for massively increased storage")
+                    Command::name("subscribe").description("get a link to subscribe to premium for 30 GB of storage")
                         .handler(account::subscribe)
                 )
                 .subcommand(
-                    Command::name("unsubscribe").description("cancel an existing subscription")
+                    Command::name("billing").description("get a link to manage your stripe billing, card, invoices, or cancellation")
+                        .handler(account::billing)
+                )
+                .subcommand(
+                    Command::name("unsubscribe").description("stop renewing your subscription; premium lasts until the period ends")
                         .handler(account::unsubscribe)
                 )
                 .subcommand(
@@ -234,6 +239,33 @@ fn run() -> CliResult<()> {
                         .input(Arg::<Uuid>::name("share-id").description("ID of pending share to delete")
                                .completor(share::pending_share_completor))
                         .handler(|target| share::delete(target.get()))
+                )
+        )
+        .subcommand(
+            Command::name("subaccount").description("accounts for scripts and tools, billed to your premium account")
+                .subcommand(
+                    Command::name("new").description("create a sub-account named <your username>+<label>")
+                        .input(Arg::str("label"))
+                        .handler(|label| subaccount::new(label.get()))
+                )
+                .subcommand(
+                    Command::name("list").description("list your sub-accounts and the space each one uses")
+                        .handler(subaccount::list)
+                )
+                .subcommand(
+                    Command::name("export").description("reveal a sub-account's account key or account phrase")
+                        .input(Flag::bool("skip-check").description("don't ask for confirmation to reveal the secret"))
+                        .input(Flag::bool("phrase").description("export the 24-word account phrase instead of the compact account key"))
+                        .input(Arg::str("username"))
+                        .handler(|skip_check, phrase, username| {
+                            subaccount::export(skip_check.get(), phrase.get(), username.get())
+                        })
+                )
+                .subcommand(
+                    Command::name("delete").description("delete a sub-account and the files it owns")
+                        .input(Flag::bool("force"))
+                        .input(Arg::str("username"))
+                        .handler(|force, username| subaccount::delete(force.get(), username.get()))
                 )
         )
         .subcommand(

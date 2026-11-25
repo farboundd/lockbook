@@ -43,6 +43,9 @@ public class Lb {
     public static native String getTimestampHumanString(long timestamp) throws LbError;
 
     public static native Usage getUsage() throws LbError;
+    public static native Usage refreshUsage() throws LbError;
+    public static native UsageEntry[] getUsageBreakdown() throws LbError;
+    public static native String bytesToHuman(long bytes);
     public static native void sync() throws LbError;
     public static native LbEvent subscribe(long rx) throws LbError;
 
@@ -54,7 +57,8 @@ public class Lb {
     public static native void deletePendingShare(String id) throws LbError;
 
     public static native void upgradeAccountGooglePlay(String purchaseToken, String accountId) throws LbError;
-    public static native void upgradeAccountStripe(String number, int expirationYear, int expirationMonth, String cvc) throws LbError;
+    public static native String stripeCheckoutUrl() throws LbError;
+    public static native String stripeBillingPortalUrl() throws LbError;
     public static native SubscriptionInfo getSubscriptionInfo() throws LbError;
     public static native void cancelSubscription() throws LbError;
 

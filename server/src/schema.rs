@@ -32,6 +32,13 @@ pub struct Account {
     pub billing_info: SubscriptionProfile,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubAccount {
+    pub parent: Owner,
+    pub counter: u32,
+    pub deleted: bool,
+}
+
 pub type ServerDb = Composite<ServerV6>;
 
 #[derive(Default)]
@@ -50,11 +57,14 @@ pub struct ServerV6 {
     pub egress_by_owner: DbHashMap<Owner, BandwidthReport>,
     pub scheduled_file_cleanups: DbHashMap<(Uuid, DocumentHmac), i64>,
     pub debug_info: DbHashMapMap<Owner, LbID, DebugInfo>,
+    pub sub_accounts: DbHashMap<Owner, SubAccount>,
+    pub sub_accounts_by_parent: DbHashMapSet<Owner, Owner>,
+    pub file_attachments: DbHashMapSet<Uuid, Uuid>,
 }
 
 impl Schema for ServerV6 {
     fn views_mut(&mut self) -> impl AsMut<[&mut dyn View]> {
-        let views: [&mut dyn View; 14] = [
+        let views: [&mut dyn View; 17] = [
             &mut self.usernames,
             &mut self.metas,
             &mut self.google_play_ids,
@@ -69,6 +79,9 @@ impl Schema for ServerV6 {
             &mut self.egress_by_owner,
             &mut self.scheduled_file_cleanups,
             &mut self.debug_info,
+            &mut self.sub_accounts,
+            &mut self.sub_accounts_by_parent,
+            &mut self.file_attachments,
         ];
         views
     }

@@ -69,14 +69,14 @@ impl<'ast> MdEdit {
         &self, event: egui::Event, root: &'ast AstNode<'ast>,
     ) -> Option<Event> {
         match event {
-            // Option+Up/Down moves a front matter row
+            // Option+Shift+Up/Down moves a front matter row
             egui::Event::Key {
                 key: key @ (Key::ArrowUp | Key::ArrowDown),
                 pressed: true,
                 modifiers,
                 ..
             } if modifiers.alt
-                && !modifiers.shift
+                && modifiers.shift
                 && !modifiers.command
                 && !self.renderer.readonly
                 && self.front_matter_row_at_caret().is_some() =>
@@ -278,7 +278,9 @@ impl<'ast> MdEdit {
                 }
             }
             egui::Event::Key { key: Key::Semicolon, pressed: true, modifiers, .. }
-                if modifiers.command && !cfg!(target_os = "ios") =>
+                if markdown_editor::front_matter::FRONT_MATTER_ENABLED
+                    && modifiers.command
+                    && !cfg!(target_os = "ios") =>
             {
                 if self.renderer.readonly {
                     return None;

@@ -36,6 +36,18 @@ pub trait Server: Clone + MaybeSend + MaybeSync + 'static {
         &self, account: &Account, request: NewAccountRequestV2,
     ) -> impl Future<Output = ApiResult<NewAccountRequestV2>> + MaybeSend;
 
+    fn new_sub_account(
+        &self, account: &Account, request: NewSubAccountRequest,
+    ) -> impl Future<Output = ApiResult<NewSubAccountRequest>> + MaybeSend;
+
+    fn list_sub_accounts(
+        &self, account: &Account, request: ListSubAccountsRequest,
+    ) -> impl Future<Output = ApiResult<ListSubAccountsRequest>> + MaybeSend;
+
+    fn delete_sub_account(
+        &self, account: &Account, request: DeleteSubAccountRequest,
+    ) -> impl Future<Output = ApiResult<DeleteSubAccountRequest>> + MaybeSend;
+
     fn change_doc_v2(
         &self, account: &Account, request: ChangeDocRequestV2,
     ) -> impl Future<Output = ApiResult<ChangeDocRequestV2>> + MaybeSend;
@@ -76,9 +88,13 @@ pub trait Server: Clone + MaybeSend + MaybeSync + 'static {
         &self, account: &Account, request: DeleteAccountRequest,
     ) -> impl Future<Output = ApiResult<DeleteAccountRequest>> + MaybeSend;
 
-    fn upgrade_account_stripe(
-        &self, account: &Account, request: UpgradeAccountStripeRequest,
-    ) -> impl Future<Output = ApiResult<UpgradeAccountStripeRequest>> + MaybeSend;
+    fn stripe_checkout(
+        &self, account: &Account, request: StripeCheckoutRequest,
+    ) -> impl Future<Output = ApiResult<StripeCheckoutRequest>> + MaybeSend;
+
+    fn stripe_billing_portal(
+        &self, account: &Account, request: StripeBillingPortalRequest,
+    ) -> impl Future<Output = ApiResult<StripeBillingPortalRequest>> + MaybeSend;
 
     fn upgrade_account_google_play(
         &self, account: &Account, request: UpgradeAccountGooglePlayRequest,
@@ -135,6 +151,10 @@ pub trait Server: Clone + MaybeSend + MaybeSync + 'static {
     fn admin_set_user_tier(
         &self, account: &Account, request: AdminSetUserTierRequest,
     ) -> impl Future<Output = ApiResult<AdminSetUserTierRequest>> + MaybeSend;
+
+    fn admin_sync_stripe(
+        &self, account: &Account, request: AdminSyncStripeRequest,
+    ) -> impl Future<Output = ApiResult<AdminSyncStripeRequest>> + MaybeSend;
 
     fn admin_rebuild_index(
         &self, account: &Account, request: AdminRebuildIndexRequest,
